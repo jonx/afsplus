@@ -409,6 +409,10 @@ int32_t afsplus_aros_make_hard_link(struct AfsplusAros *filesystem,
     return 0;
 }
 
+/* The identity the examined object reports; zero is "none known". */
+static uint64_t stub_info_object_id;
+static int32_t stub_examine_error;
+
 static int32_t examine_common(struct AfsplusArosFileInfo *output,
     uint8_t *name, uint32_t name_capacity)
 {
@@ -416,7 +420,10 @@ static int32_t examine_common(struct AfsplusArosFileInfo *output,
 
     assert(name_capacity >= sizeof(filename) - 1);
     examine_count++;
+    if (stub_examine_error != 0)
+        return stub_examine_error;
     memset(output, 0, sizeof(*output));
+    output->object_id = stub_info_object_id;
     memcpy(name, filename, sizeof(filename) - 1);
     output->disk_key = UINT64_C(0x12345678);
     output->size = stub_info_size;
@@ -1302,6 +1309,363 @@ int32_t afsplus_aros_restore_reclaim(struct AfsplusAros *f, uint64_t scope,
     report->scanned=1; report->removed=1; snapshot_calls++;
     return 0;
 }
+/* The object key of a FileInfoBlock, read where the handler writes it:
+ * 16 bytes into the extension area that starts at fib_Size64. */
+static uint64_t fib_object_key(const struct FileInfoBlock *fib)
+{
+    uint64_t key;
+
+    memcpy(&key, (const uint8_t *)&fib->fib_Size64 + 16, sizeof(key));
+    return key;
+}
+
+static uint32_t count_events(char operation)
+{
+    uint32_t count = 0;
+    size_t index;
+
+    for (index = 0; index < event_count; index++)
+        count += events[index].operation == operation;
+    return count;
+}
+
+/* dos/dos64.h: the object key of the 64-bit examine, the positional
+ * transfers and the examine by name. */
+static void dos64_packets(struct AfsplusArosPacketConfig config,
+    uint32_t whole_paths)
+{
+    enum { READ_AT64 = 2021, WRITE_AT64 = 2022, EXAMINE_NAME64 = 2023 };
+    static const uint64_t key = UINT64_C(0x0102030405060708);
+    struct AfsplusArosPacketContext *context = NULL;
+    struct DosPacket packet;
+    struct FileHandle public_file;
+    struct FileHandle read_only;
+    struct FileInfoBlock fib;
+    struct FileInfoBlock64 fib64;
+    uint8_t data[8];
+    int64_t at;
+    BPTR root;
+    BPTR lock;
+    size_t index;
+    uint64_t original_groups = stub_groups;
+
+    /* With the path group the library resolves a whole path in one call;
+     * without it the packet layer walks it, a lock a component. */
+    stub_groups = whole_paths ? stub_groups | AFSPLUS_AROS_GROUP_PATHS
+        : stub_groups & ~AFSPLUS_AROS_GROUP_PATHS;
+    assert(afsplus_aros_packet_create(&config, &context) == 0);
+    initialize_packet(&packet, ACTION_LOCATE_OBJECT);
+    packet.dp_Arg2 = packet_bstr("");
+    packet.dp_Arg3 = SHARED_LOCK;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    root = (BPTR)packet.dp_Res1;
+    assert(root != BNULL);
+    memset(&public_file, 0, sizeof(public_file));
+    initialize_packet(&packet, ACTION_FINDINPUT);
+    packet.dp_Arg1 = (SIPTR)MKBADDR(&public_file);
+    packet.dp_Arg2 = (SIPTR)root;
+    packet.dp_Arg3 = packet_bstr("file");
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && public_file.fh_Arg1 != 0);
+
+    /* 1. A 64-bit examine of an object with an identity names it and says
+     * so; every 64-bit examine packet does. */
+    stub_info_object_id = key;
+    {
+        static const LONG wide[] = { ACTION_EXAMINE_OBJECT64,
+            ACTION_EXAMINE_NEXT64, ACTION_EXAMINE_FH64 };
+        static const LONG narrow[] = { ACTION_EXAMINE_OBJECT,
+            ACTION_EXAMINE_NEXT, ACTION_EXAMINE_FH };
+
+        for (index = 0; index < sizeof(wide) / sizeof(wide[0]); index++)
+        {
+            memset(&fib64, 0x7b, sizeof(fib64));
+            initialize_packet(&packet, wide[index]);
+            packet.dp_Arg1 = wide[index] == ACTION_EXAMINE_FH64
+                ? public_file.fh_Arg1 : (SIPTR)root;
+            packet.dp_Arg2 = (SIPTR)MKBADDR(&fib64);
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+            assert((fib64.fib_ActExtFlags & 2) != 0);
+            assert(fib64.fib_ActExtFlags == 2);
+            assert(fib_object_key((struct FileInfoBlock *)&fib64) == key);
+            /* The scan position stays what it was: not the identity. */
+            assert(fib64.fib_DiskKey == (IPTR)UINT32_C(0x12345678));
+        }
+        /* A 32-bit examine sets neither the flag nor the key. */
+        for (index = 0; index < sizeof(narrow) / sizeof(narrow[0]); index++)
+        {
+            memset(&fib, 0x7b, sizeof(fib));
+            initialize_packet(&packet, narrow[index]);
+            packet.dp_Arg1 = narrow[index] == ACTION_EXAMINE_FH
+                ? public_file.fh_Arg1 : (SIPTR)root;
+            packet.dp_Arg2 = (SIPTR)MKBADDR(&fib);
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+            assert(fib.fib_ActExtFlags == 0);
+            assert(fib_object_key(&fib) == 0);
+        }
+        /* An object without an identity: a 64-bit examine sets neither. */
+        stub_info_object_id = 0;
+        memset(&fib64, 0x7b, sizeof(fib64));
+        initialize_packet(&packet, ACTION_EXAMINE_OBJECT64);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = (SIPTR)MKBADDR(&fib64);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE);
+        assert(fib64.fib_ActExtFlags == 0);
+        assert(fib_object_key((struct FileInfoBlock *)&fib64) == 0);
+        stub_info_object_id = key;
+    }
+
+    /* 2. ACTION_READ_AT64 and ACTION_WRITE_AT64 transfer at *dp_Arg4 and
+     * leave the handle's position where it was. */
+    ext_error = 0;
+    file_position = 3;
+    file_size = 5;
+    reset_events();
+    memset(data, 0, sizeof(data));
+    at = 7;
+    initialize_packet(&packet, READ_AT64);
+    packet.dp_Arg1 = public_file.fh_Arg1;
+    packet.dp_Arg2 = (SIPTR)data;
+    packet.dp_Arg3 = 5;
+    packet.dp_Arg4 = (SIPTR)&at;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == 2 && packet.dp_Res2 == 0);
+    assert(data[0] == 'o' && data[1] == 'k');
+    assert(event_count == 1 && events[0].operation == '2');
+    assert(ext_seen[0] == 7 && ext_seen[1] == 5);
+    assert(file_position == 3 && at == 7);
+
+    reset_events();
+    at = INT64_C(8589934592) + 9;
+    initialize_packet(&packet, WRITE_AT64);
+    packet.dp_Arg1 = public_file.fh_Arg1;
+    packet.dp_Arg2 = (SIPTR)data;
+    packet.dp_Arg3 = 4;
+    packet.dp_Arg4 = (SIPTR)&at;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == 4 && packet.dp_Res2 == 0);
+    assert(event_count == 1 && events[0].operation == '3');
+    assert(ext_seen[0] == UINT64_C(8589934601) && ext_seen[1] == 4);
+    assert(file_position == 3 && file_size == 5);
+
+    /* Nothing to transfer needs no buffer, and still asks the library. */
+    reset_events();
+    at = 0;
+    initialize_packet(&packet, READ_AT64);
+    packet.dp_Arg1 = public_file.fh_Arg1;
+    packet.dp_Arg4 = (SIPTR)&at;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == 0 && packet.dp_Res2 == 0);
+    assert(event_count == 1 && file_position == 3);
+
+    /* The library's own refusal is the packet's, with the DOS failure
+     * value of a transfer. */
+    reset_events();
+    ext_error = ERROR_SEEK_ERROR;
+    initialize_packet(&packet, READ_AT64);
+    packet.dp_Arg1 = public_file.fh_Arg1;
+    packet.dp_Arg2 = (SIPTR)data;
+    packet.dp_Arg3 = 5;
+    packet.dp_Arg4 = (SIPTR)&at;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == -1 && packet.dp_Res2 == ERROR_SEEK_ERROR);
+    ext_error = 0;
+
+    /* Arguments no transfer can have are refused before the library. */
+    {
+        static const LONG actions[] = { READ_AT64, WRITE_AT64 };
+        int64_t negative = -1;
+        size_t fault;
+
+        for (index = 0; index < 2; index++)
+        {
+            for (fault = 0; fault < 6; fault++)
+            {
+                reset_events();
+                at = 1;
+                initialize_packet(&packet, actions[index]);
+                packet.dp_Arg1 = public_file.fh_Arg1;
+                packet.dp_Arg2 = (SIPTR)data;
+                packet.dp_Arg3 = 4;
+                packet.dp_Arg4 = (SIPTR)&at;
+                switch (fault)
+                {
+                case 0: packet.dp_Arg4 = 0; break;
+                case 1: packet.dp_Arg4 = (SIPTR)&negative; break;
+                case 2: packet.dp_Arg3 = -1; break;
+                case 3: packet.dp_Arg3 = (SIPTR)UINT64_C(0x100000000); break;
+                case 4: packet.dp_Arg2 = 0; break;
+                default: packet.dp_Arg1 = 0; break;
+                }
+                assert(afsplus_aros_packet_process(context, &packet) == 0);
+                assert(packet.dp_Res1 == -1);
+                assert(packet.dp_Res2 == (fault == 5
+                    ? ERROR_INVALID_LOCK : ERROR_BAD_NUMBER));
+                assert(event_count == 0);
+                assert(file_position == 3);
+            }
+        }
+    }
+
+    /* A handle that may not write: made from a lock while the volume is
+     * write-protected. It reads at a position and refuses to write there. */
+    initialize_packet(&packet, ACTION_LOCATE_OBJECT);
+    packet.dp_Arg1 = (SIPTR)root;
+    packet.dp_Arg2 = packet_bstr("data");
+    packet.dp_Arg3 = SHARED_LOCK;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    lock = (BPTR)packet.dp_Res1;
+    assert(lock != BNULL);
+    stub_disk_readonly = 1;
+    memset(&read_only, 0, sizeof(read_only));
+    initialize_packet(&packet, ACTION_FH_FROM_LOCK);
+    packet.dp_Arg1 = (SIPTR)MKBADDR(&read_only);
+    packet.dp_Arg2 = (SIPTR)lock;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && read_only.fh_Arg1 != 0);
+    stub_disk_readonly = 0;
+    reset_events();
+    at = 2;
+    initialize_packet(&packet, WRITE_AT64);
+    packet.dp_Arg1 = read_only.fh_Arg1;
+    packet.dp_Arg2 = (SIPTR)data;
+    packet.dp_Arg3 = 4;
+    packet.dp_Arg4 = (SIPTR)&at;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == -1
+        && packet.dp_Res2 == ERROR_DISK_WRITE_PROTECTED);
+    assert(event_count == 0);
+    initialize_packet(&packet, READ_AT64);
+    packet.dp_Arg1 = read_only.fh_Arg1;
+    packet.dp_Arg2 = (SIPTR)data;
+    packet.dp_Arg3 = 4;
+    packet.dp_Arg4 = (SIPTR)&at;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == 2 && packet.dp_Res2 == 0);
+    assert(event_count == 1 && events[0].operation == '2');
+
+    /* 3. ACTION_EXAMINE_NAME64: the object a path names, described in one
+     * packet. The lock made to find it is freed before the reply. */
+    reset_events();
+    memset(&fib64, 0x7b, sizeof(fib64));
+    initialize_packet(&packet, EXAMINE_NAME64);
+    packet.dp_Arg1 = (SIPTR)root;
+    packet.dp_Arg2 = packet_bstr("dir/leaf");
+    packet.dp_Arg3 = (SIPTR)MKBADDR(&fib64);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert(fib64.fib_FileName[0] == 5);
+    assert(memcmp(fib64.fib_FileName + 1, "entry", 5) == 0);
+    assert(fib64.fib_Size64 == UINT64_C(0x100000002));
+    assert(fib64.fib_NumBlocks64 == UINT64_C(0x100000003));
+    assert(fib64.fib_Size == 0 && fib64.fib_NumBlocks == 0);
+    assert(fib64.fib_ActExtFlags == 2);
+    assert(fib_object_key((struct FileInfoBlock *)&fib64) == key);
+    assert(fib64.fib_Comment[0] == 0);
+    if (whole_paths)
+    {
+        assert(event_count == 2);
+        assert_event(0, 'A', "dir/leaf", AFSPLUS_AROS_LOCK_SHARED);
+    }
+    else
+    {
+        /* One lock for the directory passed through, one for the leaf. */
+        assert(event_count == 4);
+        assert_event(0, 'L', "dir", AFSPLUS_AROS_LOCK_SHARED);
+        assert_event(1, 'L', "leaf", AFSPLUS_AROS_LOCK_SHARED);
+    }
+    /* The object's own lock is the last one made, and the last one freed. */
+    assert(events[event_count - 1].operation == 'F'
+        && events[event_count - 1].base == next_lock - 1);
+    assert(count_events('A') + count_events('L') == count_events('F'));
+
+    /* A name nothing has: the library's error, no lock made, none freed.
+     * The stub refuses only whole paths. */
+    if (whole_paths)
+    {
+        reset_events();
+        stub_locate_path_error = ERROR_OBJECT_NOT_FOUND;
+        memset(&fib64, 0x7b, sizeof(fib64));
+        initialize_packet(&packet, EXAMINE_NAME64);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = packet_bstr("gone");
+        packet.dp_Arg3 = (SIPTR)MKBADDR(&fib64);
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_OBJECT_NOT_FOUND);
+        assert(event_count == 1 && events[0].operation == 'A');
+        assert(count_events('F') == 0);
+        stub_locate_path_error = 0;
+    }
+
+    /* The examine fails after the object was found: its lock is freed. */
+    reset_events();
+    stub_examine_error = ERROR_SEEK_ERROR;
+    initialize_packet(&packet, EXAMINE_NAME64);
+    packet.dp_Arg1 = (SIPTR)root;
+    packet.dp_Arg2 = packet_bstr("dir/leaf");
+    packet.dp_Arg3 = (SIPTR)MKBADDR(&fib64);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_SEEK_ERROR);
+    assert(events[event_count - 1].operation == 'F'
+        && events[event_count - 1].base == next_lock - 1);
+    assert(count_events('A') + count_events('L') == count_events('F'));
+    stub_examine_error = 0;
+
+    /* No block to fill: refused before anything is looked up. */
+    reset_events();
+    initialize_packet(&packet, EXAMINE_NAME64);
+    packet.dp_Arg1 = (SIPTR)root;
+    packet.dp_Arg2 = packet_bstr("dir/leaf");
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE
+        && packet.dp_Res2 == ERROR_INVALID_LOCK);
+    assert(event_count == 0);
+
+    /* A base that is no lock of this handler: refused the same way. */
+    reset_events();
+    initialize_packet(&packet, EXAMINE_NAME64);
+    packet.dp_Arg1 = (SIPTR)MKBADDR(&fib);
+    packet.dp_Arg2 = packet_bstr("dir/leaf");
+    packet.dp_Arg3 = (SIPTR)MKBADDR(&fib64);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 != 0);
+    assert(event_count == 0);
+
+    /* Across all of it, every lock the packet made was freed. */
+    reset_events();
+    for (index = 0; index < 5; index++)
+    {
+        initialize_packet(&packet, EXAMINE_NAME64);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = packet_bstr(index % 2 ? "a/b/c" : "d");
+        packet.dp_Arg3 = (SIPTR)MKBADDR(&fib64);
+        stub_examine_error = index == 3 ? ERROR_SEEK_ERROR : 0;
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+    }
+    stub_examine_error = 0;
+    assert(count_events('A') + count_events('L') >= 5);
+    assert(count_events('A') + count_events('L') == count_events('F'));
+
+    stub_info_object_id = 0;
+    file_position = 0;
+    file_size = 0;
+    initialize_packet(&packet, ACTION_END);
+    packet.dp_Arg1 = public_file.fh_Arg1;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    initialize_packet(&packet, ACTION_END);
+    packet.dp_Arg1 = read_only.fh_Arg1;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    initialize_packet(&packet, ACTION_FREE_LOCK);
+    packet.dp_Arg1 = (SIPTR)root;
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(afsplus_aros_packet_destroy(context) == 0);
+    stub_groups = original_groups;
+}
+
 static void snapshot_packets(struct AfsplusArosPacketConfig config)
 {
     struct AfsplusArosPacketContext *ctx = NULL;
@@ -3838,6 +4202,8 @@ int main(void)
 
     assert(afsplus_aros_packet_destroy(context) == 0);
     assert(stub_removed_watches == 4);
+    dos64_packets(config, 1);
+    dos64_packets(config, 0);
     snapshot_packets(config);
     blank_medium_format_packets(config);
     puts("afsplus packet stub: PASS");
