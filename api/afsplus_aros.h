@@ -481,6 +481,9 @@ int32_t afsplus_aros_flush(struct AfsplusAros *filesystem);
 int32_t afsplus_aros_create_directory(struct AfsplusAros *filesystem,
     uint64_t base_lock, const uint8_t *name, uint32_t name_length,
     int64_t now_seconds, uint32_t now_nanoseconds, uint64_t *output_lock);
+/* A file, directory or link whose DOS delete bit forbids deletion is
+ * ERROR_DELETE_PROTECTED, reported before ERROR_OBJECT_IN_USE. The bit is the
+ * object's, so every hard link of a protected file refuses. */
 int32_t afsplus_aros_delete_object(struct AfsplusAros *filesystem,
     uint64_t base_lock, const uint8_t *name, uint32_t name_length,
     int64_t now_seconds, uint32_t now_nanoseconds);

@@ -258,6 +258,9 @@ the AROS core implement too:
 | Source and target name one object | success, nothing changes |
 | The handler's library lacks the `API_V2` group | `ERROR_ACTION_NOT_KNOWN` |
 
+`ACTION_DELETE_OBJECT` honours the same delete bit, on files, directories and
+links, so the two ways of removing a name agree.
+
 A refusal is decided before the first change and leaves both names as they
 were. The last row is the answer of every handler without the action and the
 one a caller takes as "use another route"; `ERROR_NOT_IMPLEMENTED` belongs to

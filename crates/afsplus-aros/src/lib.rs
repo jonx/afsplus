@@ -1483,11 +1483,18 @@ impl<D: BlockDevice> ArosAdapter<D> {
         let parent = self.lock_object_or_root(base)?;
         let decoded = self.decode_component(name)?;
         let object = self.vfs.lookup(parent, &decoded)?;
-        // DOS refuses to delete an object that a lock or file handle holds.
+        let stat = self.vfs.stat(object)?;
+        // DOS refuses to delete an object whose delete bit forbids it, a
+        // file, a directory or a link alike, and one that a lock or file
+        // handle holds. The bit is the object's: every hard link of a
+        // protected file refuses.
+        if stat.protection & PROTECTION_DELETE != 0 {
+            return Err(ArosError::DeleteProtected);
+        }
         if self.lock_counts.contains_key(&object) {
             return Err(ArosError::ObjectInUse);
         }
-        match self.vfs.stat(object)?.kind {
+        match stat.kind {
             // The link itself is deleted, never its target.
             NodeKind::File | NodeKind::Symlink => self.vfs.unlink_file(parent, &decoded, now)?,
             NodeKind::Directory => self.vfs.remove_directory(parent, &decoded, now)?,

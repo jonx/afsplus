@@ -417,3 +417,63 @@ fn the_three_step_route_keeps_the_old_contents_reachable_at_every_cut() {
         eprintln!("fallback {durability:?}: {outcomes:?}");
     }
 }
+
+#[test]
+fn a_delete_protected_object_is_not_deleted() {
+    let mut adapter = adapter(formatted());
+    put(&mut adapter, b"file", b"DATA");
+    let lock = adapter.locate(None, b"file", LockAccess::Shared).unwrap();
+    adapter
+        .make_hard_link(None, b"alias", lock, timestamp(3))
+        .unwrap();
+    adapter.free_lock(lock).unwrap();
+    let directory = adapter
+        .create_directory(None, b"dir", timestamp(3))
+        .unwrap();
+    adapter.free_lock(directory).unwrap();
+    adapter
+        .make_soft_link(None, b"link", b"file", timestamp(3))
+        .unwrap();
+    // The other three RWED bits forbid nothing here.
+    for name in [&b"file"[..], b"dir"] {
+        adapter
+            .set_protection(None, name, 0b1110, timestamp(4))
+            .unwrap();
+    }
+    adapter.delete_object(None, b"dir", timestamp(5)).unwrap();
+    let directory = adapter
+        .create_directory(None, b"dir", timestamp(5))
+        .unwrap();
+    adapter.free_lock(directory).unwrap();
+
+    for name in [&b"file"[..], b"dir"] {
+        adapter
+            .set_protection(None, name, DELETE_FORBIDDEN, timestamp(6))
+            .unwrap();
+    }
+    // The bit belongs to the object, so both of its names refuse, and it
+    // is reported before a holder is.
+    let held = adapter.locate(None, b"file", LockAccess::Shared).unwrap();
+    for name in [&b"file"[..], b"alias", b"dir"] {
+        assert_eq!(
+            adapter.delete_object(None, name, timestamp(7)),
+            Err(ArosError::DeleteProtected)
+        );
+    }
+    adapter.free_lock(held).unwrap();
+    // The soft link is its own object and carries no such bit.
+    adapter.delete_object(None, b"link", timestamp(7)).unwrap();
+    assert_eq!(names(&mut adapter), ["alias", "dir", "file"]);
+    assert_eq!(get(&mut adapter, b"alias").unwrap(), b"DATA");
+
+    for name in [&b"file"[..], b"dir"] {
+        adapter.set_protection(None, name, 0, timestamp(8)).unwrap();
+    }
+    for name in [&b"file"[..], b"alias", b"dir"] {
+        adapter.delete_object(None, name, timestamp(9)).unwrap();
+    }
+    assert!(names(&mut adapter).is_empty());
+    let mut device = device_of(adapter);
+    let report = check_device(&mut device);
+    assert!(report.is_clean(), "{:?}", report.errors);
+}

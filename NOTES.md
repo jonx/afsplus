@@ -278,9 +278,11 @@ stops with "File system extension not found" on this host. 1037 stays a
 PomAROS allocation until upstream's header carries the action;
 `afsplus_ext_packet.h` says so.
 
-The delete bit is enforced for this action alone, because the neutral
-contract states it. `ACTION_DELETE_OBJECT` deletes a delete-protected file on
-AFS+, which no document records as a decision.
+The delete bit was enforced nowhere: `ACTION_DELETE_OBJECT` deleted a
+delete-protected file, which no document recorded as a decision. A follow-up
+commit of the same day makes the delete action refuse with
+`ERROR_DELETE_PROTECTED` as the RAM and FAT handlers do, for files,
+directories and links, before it reports a holder.
 
 
 ## 2026-11-05 — Integrate DOS64 and remove superseded branches
