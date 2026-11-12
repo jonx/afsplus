@@ -255,7 +255,8 @@ error, the channel closes, and the volume is unmounted with nothing recorded.
 macFUSE 5.3 delivered every write of one to fourteen bytes to the driver as
 zeros (macFUSE issue 1188). The file looked right while the volume was
 mounted, because the kernel served it from its own cache, and held zeros once
-the volume came back. macFUSE 5.4.0 fixes it and is required: the usage
+the volume came back. macFUSE 5.4.0 fixes it and is required (5.5.0 is verified as well; it
+still does not forward `fsync`): the usage
 battery rereads twenty small files after the remount to hold it, and
 `afsplus-mount` reads the release from the installed macFUSE bundle and
 refuses an older one before loading it. The same
@@ -294,6 +295,14 @@ case-insensitive volume;
 [tools/check-mount-name-policy.py](../tools/check-mount-name-policy.py)
 mounts one volume of each policy and requires the answer and the behaviour to
 agree.
+
+**A symlink is opened as itself.** `copyfile(3)`, which `cp` uses, opens a
+symlink with `O_SYMLINK` to copy its extended attributes, mode and times
+through the descriptor, and that open reaches the driver as an `OPEN` of the
+link. The driver gives it a handle with no data: attribute and metadata
+requests work as on any object, a read or write through it is refused.
+[crates/afsplus-fuse/tests/symlinks.rs](../crates/afsplus-fuse/tests/symlinks.rs)
+holds it.
 
 **A write-only handle is read through.** A program that opens a file
 write-only and writes part of a page, as `>>` does, makes the kernel read the

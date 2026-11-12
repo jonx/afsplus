@@ -15,7 +15,8 @@
 # the operations not yet committed, whole and in order (ADR-121). Without it
 # every operation is durable before it is answered.
 #
-# Needs macOS with macFUSE 5.4.0 or later and its FSKit module enabled
+# Needs macOS with macFUSE 5.4.0 or later (verified with 5.5.0) and its FSKit
+# module enabled
 # (docs/macos-fskit-activation.md). The how-to is in
 # testing/image-workflow.md#copying-files-in-and-out-of-a-stopped-image.
 set -eu

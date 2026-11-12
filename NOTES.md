@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-11-12 — Populate an image from the Mac at window speed](#2026-11-12--populate-an-image-from-the-mac-at-window-speed)
 - [2026-11-12 — Mount a stopped lab image from the Mac](#2026-11-12--mount-a-stopped-lab-image-from-the-mac)
 - [2026-11-12 — Hold ACTION_REPLACE_OBJECT to the neutral DOS contract](#2026-11-12--hold-actionreplaceobject-to-the-neutral-dos-contract)
 - [2026-11-05 — Integrate DOS64 and remove superseded branches](#2026-11-05--integrate-dos64-and-remove-superseded-branches)
@@ -243,6 +244,32 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+
+## 2026-11-12 — Populate an image from the Mac at window speed
+
+With macFUSE 5.5.0 installed, the activation took three steps: a first mount
+answered `File system extension not found` and macFUSE offered to register
+its extension; the registration needed a restart; after it the mount
+answered `File system extension not enabled` until the extension was
+switched on under Login Items & Extensions. No Recovery boot, no security
+change ([macos-fskit-activation](docs/macos-fskit-activation.md)).
+
+`cp -R` reported "could not copy extended attributes: Is a directory" for
+every symlink. copyfile opens a link with `O_SYMLINK` and copies its
+attributes (`com.apple.provenance` and user ones) through the descriptor;
+the driver refused the open as "not a file". A FUSE open of a symlink now
+gets a data-less handle.
+
+Small files went at 10 to 20 per second whatever their size: a trace of
+`rsync -a` showed ten changing requests per file, each a commit of its own,
+19 device flushes per file. fsync still does not reach the driver on 5.5.0,
+so the mount cannot wait for it. Metadata edits joined the delayed window
+of ADR-121, and `--commit=delayed` offers that window on the mount
+(ADR-137, proposed); 500 files of 20 KB went from 11 to 134 files/s with
+rsync. The 5,000-file runs with delayed commit, the SIGKILL test on the
+mount and a file over 4 GiB were not run: after a mount that macOS refused
+with status 69, every later mount on the M5 stayed pending until its
+30-second limit, and clearing that needs the owner.
 
 ## 2026-11-12 — Mount a stopped lab image from the Mac
 

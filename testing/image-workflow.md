@@ -48,7 +48,17 @@ it refuses while a program still uses the volume, and `unmount --force`
 unmounts anyway at the cost of I/O errors in those programs.
 
 Prerequisites on macOS: macFUSE 5.4.0 or later with its FSKit module enabled
-([macos-fskit-activation](../docs/macos-fskit-activation.md)).
+([macos-fskit-activation](../docs/macos-fskit-activation.md), which also
+gives the activation steps after an upgrade). The workflow is verified with
+macFUSE 5.5.0 on the M5: a read-write mount; `cp -R` of files of 1, 3, 7, 14,
+15, 16, 100, 4,096 and 5,000 bytes and of 50 MiB, a nested directory, a
+symlink, `chmod 640` and an append with `>>`; unmount with the checker clean;
+a read-only remount where `diff -r` finds the tree identical, mode and link
+target kept, a write refused and `find` listing each entry once; `cp -R`,
+`cp -a` and `rsync -a` of symlinks to a file, to a directory and to nothing,
+with no error and the links' attributes kept; populations with
+`--commit=delayed`. Not verified: a file over 4 GiB through the mount, and
+`rsync -aX` (macOS ships openrsync, which has no `-X`).
 `afsplus-mount` refuses an older macFUSE: 5.3.x stores writes of one to
 fourteen bytes as zeros and lists entries several times
 ([mounted-volume-testing](mounted-volume-testing.md#macfuse-releases)).

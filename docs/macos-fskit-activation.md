@@ -1,11 +1,24 @@
 # macFUSE FSKit activation on macOS
 
-> **ADRs:** none · **Spec:** none ·
+> **ADRs:** [ADR-040](../adr/ADR-040-fuse-protocol-boundary.md), [ADR-137](../adr/ADR-137-host-mount-delayed-commit-option.md) · **Spec:** none ·
 > **Tests:** [aros-system-volume-qualification](../testing/aros-system-volume-qualification.md) · **Milestones:** M08
 
 AFS+ uses macFUSE's user-space FSKit backend on current macOS releases. It
 does not require the legacy macFUSE kernel extension, reduced security, or a
 restart into Recovery.
+
+<!-- toc -->
+
+- [Normal activation](#normal-activation)
+- [Why macFUSE and not FUSE-T](#why-macfuse-and-not-fuse-t)
+- [After installing or upgrading macFUSE](#after-installing-or-upgrading-macfuse)
+- [Diagnose without changing the system](#diagnose-without-changing-the-system)
+- [Work around an inert Settings switch](#work-around-an-inert-settings-switch)
+- [Host fsync fallback](#host-fsync-fallback)
+- [Restore the previous FSKit list](#restore-the-previous-fskit-list)
+- [Scope and caution](#scope-and-caution)
+
+<!-- /toc -->
 
 ## Normal activation
 
@@ -23,17 +36,43 @@ upstream in [macfuse/macfuse#1194](https://github.com/macfuse/macfuse/issues/119
 Check that issue before using the workaround: a supported fix or activation
 procedure may supersede it.
 
-## After upgrading macFUSE
+## Why macFUSE and not FUSE-T
 
-An upgrade can leave the module registered but no longer enabled, and every
-mount then fails with `MFMount: File system extension not found`. On macOS
-26.6.2 with macFUSE 5.4.0, enabling it again for the user was enough, with no
-restart:
+`afsplus-mount` speaks to macFUSE's FSKit backend through its message channel
+(`MFMount.framework`, loaded at run time by `afsplus-macfuse-sys`); that is
+the only macOS backend the code has. FUSE-T translates FUSE into an NFS
+server driven by its own libfuse loop: a session reached `INIT`, `STATFS` and
+`GETATTR` and was then closed, so it would need an adapter of its own
+([ADR-040](../adr/ADR-040-fuse-protocol-boundary.md)). macFUSE's FSKit
+backend needs no kernel extension, no reduced security and no Recovery boot.
 
-```sh
-pluginkit -e use -i io.macfuse.app.fsmodule.macfuse
-tools/macos-fskit-modules.sh check
-```
+## After installing or upgrading macFUSE
+
+Observed on the M5 with macFUSE 5.5.0 after `brew upgrade --cask macfuse`
+(the upgrade asks for an administrator password):
+
+1. The first mount fails with `File system extension not found`, and
+   macFUSE shows a **Register File System Extension** dialog. Register it.
+2. Restart the Mac. Until then the extension stays unavailable.
+3. After the restart the mount fails with `File system extension not
+   enabled`. Switch macFUSE on in **System Settings > General > Login Items &
+   Extensions > File System Extensions**, or for the current user:
+
+   ```sh
+   pluginkit -e use -i io.macfuse.app.fsmodule.macfuse
+   tools/macos-fskit-modules.sh check
+   ```
+
+4. Mounting then works.
+
+This is the FSKit backend, a user-space extension. Homebrew's caveat about
+allowing a kernel extension is generic to the cask and does not apply. If
+macOS ever asks to boot into Recovery or to lower the security policy for
+AFS+, the answer is no: that path is the legacy kernel extension, which AFS+
+does not use.
+
+With macFUSE 5.4.0 on macOS 26.6.2 an upgrade left the module registered but
+disabled, and the `pluginkit` command alone was enough, with no restart.
 
 ## Diagnose without changing the system
 
@@ -94,8 +133,9 @@ has succeeded, this mount workflow does not request administrator privileges.
 
 ## Host fsync fallback
 
-The macFUSE FSKit transport can flush dirty pages with FUSE `WRITE` and return
-success from host `fsync(2)` without delivering a FUSE `FSYNC` request. The
+The macFUSE FSKit transport flushes dirty pages with FUSE `WRITE` and returns
+success from host `fsync(2)` and `F_FULLFSYNC` without delivering a FUSE
+`FSYNC` request (checked again with macFUSE 5.5.0). The
 AFS+ macOS mount therefore uses durable data replies: each `WRITE` and
 size-changing `SETATTR` completes the bounded AFS+ durability operation before
 the transport receives success. This is scoped to the FSKit mount; the
@@ -106,7 +146,10 @@ The fallback requires neither the legacy kernel extension nor administrator
 authorization. It trades batching for correctness and can add up to the normal
 data-and-record barriers to each delivered write. Host benchmark reports must
 identify this mode rather than comparing it silently with an ordinary
-writeback filesystem.
+writeback filesystem. `--commit=delayed` gives the fallback up on request
+for populating an image, where the unmount is the durability point
+([image-workflow](../testing/image-workflow.md#populating-an-image-with-many-files),
+[ADR-137](../adr/ADR-137-host-mount-delayed-commit-option.md)).
 
 ## Restore the previous FSKit list
 
