@@ -2526,7 +2526,14 @@ int32_t afsplus_aros_packet_process(
         uint32_t source_ready = 0;
         uint32_t target_ready = 0;
 
-        error = lock_id(context, (BPTR)packet->dp_Arg1, &source_base);
+        /* ACTION_REPLACE_OBJECT is a standard DOS action. Without the group
+         * the handler does not know it, and says so before it reads an
+         * argument: a caller takes ERROR_ACTION_NOT_KNOWN, and no other
+         * value, as "use another route". */
+        if (packet->dp_Type == AFSPLUS_ACTION_REPLACE_OBJECT)
+            error = require_group(context, AFSPLUS_AROS_GROUP_API_V2);
+        if (error == 0)
+            error = lock_id(context, (BPTR)packet->dp_Arg1, &source_base);
         if (error == 0)
             error = lock_id(context, (BPTR)packet->dp_Arg3, &target_base);
         if (error == 0)
@@ -2547,8 +2554,6 @@ int32_t afsplus_aros_packet_process(
         }
         if (error == 0)
             error = packet_now(context, &seconds, &nanoseconds);
-        if (error == 0 && packet->dp_Type == AFSPLUS_ACTION_REPLACE_OBJECT)
-            error = require_group(context, AFSPLUS_AROS_GROUP_API_V2);
         if (error == 0 && packet->dp_Type == AFSPLUS_ACTION_REPLACE_OBJECT)
             error = afsplus_aros_replace(context->filesystem, source.id,
                 source.leaf, source.leaf_length, target.id, target.leaf,

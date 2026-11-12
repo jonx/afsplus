@@ -742,7 +742,12 @@ int32_t afsplus_aros_read_soft_link(struct AfsplusAros *filesystem,
  * fall back to a byte copy. preallocate reserves storage without changing
  * the file size and answers ERROR_OBJECT_TOO_LARGE, with nothing reserved,
  * when one request exceeds the mount's per-request block budget. replace is
- * an atomic rename over an existing target that no lock or handle holds.
+ * the atomic rename of a regular file over a regular file, and a plain rename
+ * without a target. A source or target of another type is
+ * ERROR_OBJECT_WRONG_TYPE, a target that a lock or handle holds
+ * ERROR_OBJECT_IN_USE, a target whose delete bit forbids deletion
+ * ERROR_DELETE_PROTECTED; one object under both names succeeds and changes
+ * nothing. A refusal changes neither name.
  * advise takes an afsplus_access_hint_t value and reports what it changed;
  * no hint alters durability, contents or allocation. */
 int32_t afsplus_aros_read_at(struct AfsplusAros *filesystem, uint64_t file,

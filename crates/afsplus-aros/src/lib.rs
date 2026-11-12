@@ -158,6 +158,10 @@ pub struct VolumePolicy {
     pub pending_intent_records: u32,
 }
 
+/// `FIBF_DELETE` of the DOS protection word: set, the object may not be
+/// deleted. The low four bits of the word are stored in that inverted sense.
+const PROTECTION_DELETE: u64 = 1;
+
 /// AROS DOS secondary result values used by the Alpha-0 packet bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -179,6 +183,7 @@ pub enum ArosError {
     SeekError = 219,
     CommentTooBig = 220,
     DiskFull = 221,
+    DeleteProtected = 222,
     WriteProtected = 223,
     NotDosDisk = 225,
     NoMoreEntries = 232,
@@ -1095,9 +1100,15 @@ impl<D: BlockDevice> ArosAdapter<D> {
         Ok(AdviceEffect::None)
     }
 
-    /// Atomic replace: `target` names the source object afterwards and a
-    /// crash leaves either the old or the new target, never neither. A
-    /// target that a lock or handle holds is not replaced.
+    /// `ACTION_REPLACE_OBJECT`: `target` names the source file afterwards
+    /// and a crash leaves either the old or the new target, never neither.
+    /// Without a target it is a rename. The contract is the
+    /// filesystem-neutral one of dos.library `ReplaceObject`: both objects
+    /// are regular files (`ObjectWrongType` otherwise), a target that a lock
+    /// or handle holds is `ObjectInUse`, a target whose DOS delete bit
+    /// forbids deletion is `DeleteProtected`, and two names of one object
+    /// succeed and change nothing. Every refusal is decided before the first
+    /// change, so it leaves both names as they were.
     pub fn replace(
         &mut self,
         source_base: Option<LockId>,
@@ -1112,11 +1123,26 @@ impl<D: BlockDevice> ArosAdapter<D> {
         let source = self.decode_component(source_name)?;
         let target = self.decode_component(target_name)?;
         let object_id = self.vfs.lookup(source_parent, &source)?;
+        if self.vfs.stat(object_id)?.kind != NodeKind::File {
+            return Err(ArosError::ObjectWrongType);
+        }
         match self.vfs.lookup(target_parent, &target) {
-            Ok(existing) if self.lock_counts.contains_key(&existing) => {
-                return Err(ArosError::ObjectInUse);
+            // One object under both names, a hard link or the same entry:
+            // the replacement is already in place.
+            Ok(existing) if existing == object_id => return Ok(()),
+            Ok(existing) => {
+                let stat = self.vfs.stat(existing)?;
+                if stat.kind != NodeKind::File {
+                    return Err(ArosError::ObjectWrongType);
+                }
+                if self.lock_counts.contains_key(&existing) {
+                    return Err(ArosError::ObjectInUse);
+                }
+                if stat.protection & PROTECTION_DELETE != 0 {
+                    return Err(ArosError::DeleteProtected);
+                }
             }
-            Ok(_) | Err(VfsError::NotFound) => {}
+            Err(VfsError::NotFound) => {}
             Err(error) => return Err(error.into()),
         }
         self.vfs

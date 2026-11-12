@@ -26,6 +26,7 @@ fn header_name(error: ArosError) -> &'static str {
         ArosError::SeekError => "ERROR_SEEK_ERROR",
         ArosError::CommentTooBig => "ERROR_COMMENT_TOO_BIG",
         ArosError::DiskFull => "ERROR_DISK_FULL",
+        ArosError::DeleteProtected => "ERROR_DELETE_PROTECTED",
         ArosError::WriteProtected => "ERROR_WRITE_PROTECTED",
         ArosError::NotDosDisk => "ERROR_NOT_A_DOS_DISK",
         ArosError::NoMoreEntries => "ERROR_NO_MORE_ENTRIES",
@@ -35,7 +36,7 @@ fn header_name(error: ArosError) -> &'static str {
     }
 }
 
-const ALL: [ArosError; 24] = [
+const ALL: [ArosError; 25] = [
     ArosError::Unknown,
     ArosError::PublicationUncertain,
     ArosError::NoFreeStore,
@@ -54,6 +55,7 @@ const ALL: [ArosError; 24] = [
     ArosError::SeekError,
     ArosError::CommentTooBig,
     ArosError::DiskFull,
+    ArosError::DeleteProtected,
     ArosError::WriteProtected,
     ArosError::NotDosDisk,
     ArosError::NoMoreEntries,

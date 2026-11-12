@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-11-12 — Hold ACTION_REPLACE_OBJECT to the neutral DOS contract](#2026-11-12--hold-actionreplaceobject-to-the-neutral-dos-contract)
 - [2026-11-05 — Integrate DOS64 and remove superseded branches](#2026-11-05--integrate-dos64-and-remove-superseded-branches)
 - [2026-11-04 — Port the MorphOS DOS64 packet contract](#2026-11-04--port-the-morphos-dos64-packet-contract)
 - [2026-10-18 — Second review pass over snapshots, restore and their commands](#2026-10-18--second-review-pass-over-snapshots-restore-and-their-commands)
@@ -240,6 +241,46 @@ Entry format: `## YYYY-MM-DD — title`.
 - [2026-08-29 — First executable prototype](#2026-08-29--first-executable-prototype)
 
 <!-- /toc -->
+
+
+## 2026-11-12 — Hold ACTION_REPLACE_OBJECT to the neutral DOS contract
+
+The common package engine replaces its state through dos.library
+`ReplaceObject`, which is being offered to upstream AROS with RAM and FAT
+handler implementations, and falls back to an aside name where the action is
+absent. Its memo asked AFS+ for six things; this entry records each.
+
+The adapter's `replace` implemented atomicity and the held-target refusal
+only. It takes the rest of the contract: a source or target that is not a
+regular file is `ERROR_OBJECT_WRONG_TYPE` (a directory source reached the
+batched rename and came back as `ERROR_OBJECT_TOO_LARGE`), a delete-protected
+target is `ERROR_DELETE_PROTECTED`, a new adapter error, and one object under
+both names succeeds without a change. The packet translator checks the
+`API_V2` group before it reads an argument, so a library without the group
+answers `ERROR_ACTION_NOT_KNOWN` whatever the locks are; it answered that
+value already when the arguments were valid.
+
+Crash atomicity held before the change and is pinned at the adapter:
+`replace_object.rs` records a replacement and its flush, enumerates every
+modeled cut in both durability modes (5,191 and 4,846 images) and accepts
+only old-target-with-source or new-target-without-source. The same harness
+runs the engine's three-step route on the name `.pkgold1a2b3c4d` and accepts
+only the four states in which the old contents stay reachable.
+
+The DOS64 question is answered by the code: the action shares the case block
+of `ACTION_RENAME_OBJECT` and reads `dp_Arg1` to `dp_Arg4` as lock, BSTR,
+lock, BSTR, and the source-header packet matrix, built against core headers
+that carry `dos/dos64.h`, passes with the new cases. No SDK-built
+`check-aros-ffi.sh` run and no target run belong to this entry.
+
+The engine's host model was not run on a mounted AFS+ volume: `afsplus-mount`
+stops with "File system extension not found" on this host. 1037 stays a
+PomAROS allocation until upstream's header carries the action;
+`afsplus_ext_packet.h` says so.
+
+The delete bit is enforced for this action alone, because the neutral
+contract states it. `ACTION_DELETE_OBJECT` deletes a delete-protected file on
+AFS+, which no document records as a decision.
 
 
 ## 2026-11-05 — Integrate DOS64 and remove superseded branches

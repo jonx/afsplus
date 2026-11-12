@@ -29,9 +29,19 @@
 #include <stdint.h>
 
 #define ACTION_AFSPLUS_EXT INT32_C(0x41465332)
-/* Filesystem-neutral atomic namespace replacement, allocated by AROS core.
- * Declare the wire identity here so the external handler also builds with
- * SDKs predating that DOS interface. No alternate replacement semantics. */
+/* ACTION_REPLACE_OBJECT, the filesystem-neutral atomic replacement of a
+ * regular file that dos.library ReplaceObject sends: source lock, source
+ * BSTR name, target lock, target BSTR name, as ACTION_RENAME_OBJECT. Declared
+ * here so the external handler also builds with SDKs predating that DOS
+ * interface. No alternate replacement semantics.
+ *
+ * 1037 is the allocation of the PomAROS core (dos.library 50.84). It is an
+ * upstream AROS allocation only once upstream's dos/dosextens.h carries
+ * ACTION_REPLACE_OBJECT; the number upstream assigns is the one this constant
+ * takes, and this is the one place it is stated. Unlike an ACTION_AFSPLUS_EXT
+ * operation, the action is a standard DOS one: a handler whose library lacks
+ * the API_V2 group answers ERROR_ACTION_NOT_KNOWN, the value every caller
+ * reads as "this handler cannot, use another route". */
 #define AFSPLUS_ACTION_REPLACE_OBJECT INT32_C(1037)
 
 #define AFSPLUS_EXT_MAGIC UINT32_C(0x41465332)

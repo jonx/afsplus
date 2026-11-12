@@ -16,6 +16,7 @@
   - [synchronization](#synchronization)
   - [cloning](#cloning)
   - [preallocation and access intent](#preallocation-and-access-intent)
+  - [atomic replace as a DOS action](#atomic-replace-as-a-dos-action)
   - [extent map](#extent-map)
   - [observation](#observation)
 - [4. Compatibility adapters](#4-compatibility-adapters)
@@ -232,6 +233,46 @@ write, `CloneFile`, `CloneRange` and atomic replace as the `API_V2`
 entry-point group of [`afsplus_aros.h`](../api/afsplus_aros.h). They operate
 on the same locks and file handles as the DOS calls, and the positioned calls
 neither use nor move the DOS file position.
+
+### atomic replace as a DOS action
+
+Atomic replace is also a standard DOS action, so a program needs no AFS+
+header to use it: dos.library `ReplaceObject(source, target)` sends
+`ACTION_REPLACE_OBJECT` with the four arguments of `ACTION_RENAME_OBJECT`
+(source lock, source BSTR name, target lock, target BSTR name), and the
+handler serves it through the same entry point as the `REPLACE` operation of
+the transport. [`afsplus_ext_packet.h`](../api/afsplus_ext_packet.h) states
+the packet number and whose allocation it is.
+
+The contract is the filesystem-neutral one, which the RAM and FAT handlers of
+the AROS core implement too:
+
+| Case | Answer |
+|---|---|
+| Source is not a regular file | `ERROR_OBJECT_WRONG_TYPE` |
+| Target exists and is not a regular file | `ERROR_OBJECT_WRONG_TYPE` |
+| A lock or an open handle holds the target | `ERROR_OBJECT_IN_USE` |
+| The target's delete bit forbids deletion | `ERROR_DELETE_PROTECTED` |
+| The volume is write-protected | `ERROR_DISK_WRITE_PROTECTED` |
+| No target | the source is renamed |
+| Source and target name one object | success, nothing changes |
+| The handler's library lacks the `API_V2` group | `ERROR_ACTION_NOT_KNOWN` |
+
+A refusal is decided before the first change and leaves both names as they
+were. The last row is the answer of every handler without the action and the
+one a caller takes as "use another route"; `ERROR_NOT_IMPLEMENTED` belongs to
+the operations of `ACTION_AFSPLUS_EXT` only.
+
+AFS+ gives the action its strongest form. After a power cut at any point of a
+replacement, a remount shows the target name with the complete old or the
+complete new contents, and the source name is gone exactly when the target
+holds the new ones. The route of a caller on a DOS without `ReplaceObject`,
+which moves the old file aside under an ordinary name, renames the new one
+into place and deletes the aside, needs nothing from AFS+: at every cut the
+old contents are under the name or under the aside until the new ones are
+under the name.
+[`replace_object.rs`](../crates/afsplus-aros/tests/replace_object.rs) holds
+both properties over every modeled cut, in both durability modes.
 
 ### extent map
 

@@ -1536,6 +1536,75 @@ int main(void)
     assert_event(1, '7', "old", 0);
     assert(ext_seen[4]);
 
+    /* Every refusal of the replacement contract reaches the sender as the
+     * entry point states it, with DOSFALSE. The same object under both names
+     * is the entry point's success and travels as one. */
+    {
+        static const int32_t refusals[] = {
+            ERROR_OBJECT_WRONG_TYPE, ERROR_OBJECT_IN_USE,
+            ERROR_DELETE_PROTECTED, ERROR_DISK_WRITE_PROTECTED,
+            ERROR_OBJECT_NOT_FOUND,
+        };
+        unsigned int index;
+
+        for (index = 0; index < sizeof(refusals) / sizeof(refusals[0]);
+            index++)
+        {
+            reset_events();
+            ext_error = refusals[index];
+            initialize_packet(&packet, AFSPLUS_ACTION_REPLACE_OBJECT);
+            packet.dp_Arg1 = (SIPTR)root;
+            packet.dp_Arg2 = packet_bstr("old");
+            packet.dp_Arg3 = (SIPTR)root;
+            packet.dp_Arg4 = packet_bstr("new");
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSFALSE
+                && packet.dp_Res2 == refusals[index]);
+            assert_event(0, '7', "old", 0);
+            assert(event_count == 1);
+        }
+        ext_error = 0;
+
+        reset_events();
+        initialize_packet(&packet, AFSPLUS_ACTION_REPLACE_OBJECT);
+        packet.dp_Arg1 = (SIPTR)root;
+        packet.dp_Arg2 = packet_bstr("new");
+        packet.dp_Arg3 = (SIPTR)root;
+        packet.dp_Arg4 = packet_bstr("new");
+        assert(afsplus_aros_packet_process(context, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert_event(0, '7', "new", 0);
+        assert(ext_seen[4] && event_count == 1);
+    }
+
+    /* A library without the API v2 group does not know the action. It says
+     * so whatever the arguments are, here two locks it never issued, and
+     * reaches no entry point. The classic rename keeps working. */
+    {
+        struct AfsplusArosPacketContext *plain = NULL;
+        uint64_t all_groups = stub_groups;
+
+        stub_groups &= ~AFSPLUS_AROS_GROUP_API_V2;
+        assert(afsplus_aros_packet_create(&config, &plain) == 0);
+        reset_events();
+        initialize_packet(&packet, AFSPLUS_ACTION_REPLACE_OBJECT);
+        packet.dp_Arg1 = (SIPTR)MKBADDR((void *)(uintptr_t)UINT32_C(0x7000));
+        packet.dp_Arg2 = packet_bstr("old");
+        packet.dp_Arg3 = (SIPTR)MKBADDR((void *)(uintptr_t)UINT32_C(0x7000));
+        packet.dp_Arg4 = packet_bstr("new");
+        assert(afsplus_aros_packet_process(plain, &packet) == 0);
+        assert(packet.dp_Res1 == DOSFALSE
+            && packet.dp_Res2 == ERROR_ACTION_NOT_KNOWN);
+        assert(event_count == 0);
+        initialize_packet(&packet, ACTION_RENAME_OBJECT);
+        packet.dp_Arg2 = packet_bstr("old");
+        packet.dp_Arg4 = packet_bstr("new");
+        assert(afsplus_aros_packet_process(plain, &packet) == 0);
+        assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+        assert(afsplus_aros_packet_destroy(plain) == 0);
+        stub_groups = all_groups;
+    }
+
     reset_events();
     initialize_packet(&packet, ACTION_MAKE_LINK);
     packet.dp_Arg1 = (SIPTR)root;
