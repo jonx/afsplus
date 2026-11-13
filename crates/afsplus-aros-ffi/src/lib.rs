@@ -196,7 +196,8 @@ pub struct AfsplusArosDevice {
     pub struct_size: u32,
     pub context: *mut c_void,
     pub block_size: u32,
-    pub reserved: u32,
+    /// Most blocks one callback may carry; zero means one.
+    pub max_transfer_blocks: u32,
     pub total_blocks: u64,
     pub read_block: Option<AfsplusArosReadBlock>,
     pub write_block: Option<AfsplusArosWriteBlock>,
@@ -449,6 +450,7 @@ pub struct AfsplusArosCounters {
     pub cache_blocks: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
+    pub cache_decoded_hits: u64,
 }
 
 #[repr(C)]
@@ -495,7 +497,7 @@ pub struct AfsplusArosExtent {
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosExtent>()];
 const _: [(); 96] = [(); std::mem::size_of::<AfsplusArosStat>()];
 const _: [(); 24] = [(); std::mem::size_of::<AfsplusArosDirEntry>()];
-const _: [(); 112] = [(); std::mem::size_of::<AfsplusArosCounters>()];
+const _: [(); 120] = [(); std::mem::size_of::<AfsplusArosCounters>()];
 const _: [(); 136] = [(); std::mem::size_of::<AfsplusArosHealth>()];
 const _: [(); 16] = [(); std::mem::size_of::<AfsplusArosHealthEvent>()];
 const _: [(); 40] = [(); std::mem::size_of::<AfsplusArosTraceCounters>()];
@@ -555,6 +557,8 @@ impl DeviceCounters {
 struct CallbackDevice {
     counters: Arc<DeviceCounters>,
     context: *mut c_void,
+    /// Most blocks one callback carries.
+    max_transfer_blocks: usize,
     block_size: usize,
     total_blocks: u64,
     read_block: AfsplusArosReadBlock,
@@ -603,6 +607,52 @@ impl BlockDevice for CallbackDevice {
         result
     }
 
+    /// A run is one callback for as much of it as the device takes at
+    /// once, straight into the caller's buffer.
+    fn read_blocks(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        afsplus_block::check_run(buffer.len(), self.block_size)?;
+        let piece = self.max_transfer_blocks * self.block_size;
+        for (index, part) in buffer.chunks_mut(piece).enumerate() {
+            let first = lba + (index * self.max_transfer_blocks) as u64;
+            self.validate_run(first, part.len())?;
+            let length = u32::try_from(part.len()).map_err(|_| callback_error(-1))?;
+            // SAFETY: as in `read_block`; `part` is writable for exactly
+            // `length` bytes, a whole number of blocks within the device.
+            let status =
+                unsafe { (self.read_block)(self.context, first, part.as_mut_ptr(), length) };
+            let result = callback_status(status);
+            self.counters.finish(
+                &result,
+                &self.counters.reads,
+                Some((&self.counters.read_bytes, part.len())),
+            );
+            result?;
+        }
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        afsplus_block::check_run(data.len(), self.block_size)?;
+        let write = self.write_block.ok_or_else(|| callback_error(-1))?;
+        let piece = self.max_transfer_blocks * self.block_size;
+        for (index, part) in data.chunks(piece).enumerate() {
+            let first = lba + (index * self.max_transfer_blocks) as u64;
+            self.validate_run(first, part.len())?;
+            let length = u32::try_from(part.len()).map_err(|_| callback_error(-1))?;
+            // SAFETY: as in `write_block`; `part` is readable for exactly
+            // `length` bytes and is not retained by the callback.
+            let status = unsafe { write(self.context, first, part.as_ptr(), length) };
+            let result = callback_status(status);
+            self.counters.finish(
+                &result,
+                &self.counters.writes,
+                Some((&self.counters.written_bytes, part.len())),
+            );
+            result?;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<(), BlockError> {
         let flush = self.flush.ok_or_else(|| callback_error(-1))?;
         // SAFETY: the callback/context lifetime is the mount lifetime.
@@ -613,6 +663,18 @@ impl BlockDevice for CallbackDevice {
 }
 
 impl CallbackDevice {
+    /// A run of whole blocks that lies within the device.
+    fn validate_run(&self, lba: u64, length: usize) -> Result<(), BlockError> {
+        let blocks = (length / self.block_size) as u64;
+        if lba >= self.total_blocks || blocks > self.total_blocks - lba {
+            return Err(BlockError::OutOfBounds {
+                lba,
+                total_blocks: self.total_blocks,
+            });
+        }
+        Ok(())
+    }
+
     fn validate_access(&self, lba: u64, length: usize) -> Result<(), BlockError> {
         if lba >= self.total_blocks {
             return Err(BlockError::OutOfBounds {
@@ -944,7 +1006,6 @@ pub extern "C" fn afsplus_aros_mount(
             || config.struct_size as usize != std::mem::size_of::<AfsplusArosMountConfig>()
             || device.block_size == 0
             || device.total_blocks == 0
-            || device.reserved != 0
             || config.flags & !MOUNT_FLAGS != 0
         {
             return Err(ArosError::InvalidComponentName);
@@ -974,6 +1035,7 @@ pub extern "C" fn afsplus_aros_mount(
         let callback_device = CallbackDevice {
             counters: Arc::clone(&counters),
             context: device.context,
+            max_transfer_blocks: device.max_transfer_blocks.max(1) as usize,
             block_size: device.block_size as usize,
             total_blocks: device.total_blocks,
             read_block,
@@ -1094,7 +1156,6 @@ pub extern "C" fn afsplus_aros_format(
             || device.struct_size as usize != std::mem::size_of::<AfsplusArosDevice>()
             || device.block_size != 4096
             || device.total_blocks == 0
-            || device.reserved != 0
         {
             return Err(ArosError::BadNumber);
         }
@@ -1112,6 +1173,7 @@ pub extern "C" fn afsplus_aros_format(
         let mut callback_device = CallbackDevice {
             counters: Arc::new(DeviceCounters::default()),
             context: device.context,
+            max_transfer_blocks: device.max_transfer_blocks.max(1) as usize,
             block_size: device.block_size as usize,
             total_blocks: device.total_blocks,
             read_block,
@@ -2354,7 +2416,7 @@ pub extern "C" fn afsplus_aros_counters(
         let device = &bridge.device;
         let (heap_bytes, heap_peak_bytes) = heap::sample();
         let cache = bridge.cache.stats();
-        let cache_blocks = bridge.cache.capacity() as u64;
+        let cache_blocks = (bridge.cache.capacity() + bridge.cache.data_capacity()) as u64;
         write_sized_output(
             output,
             AFSPLUS_AROS_COUNTERS_FIRST_LAYOUT,
@@ -2374,6 +2436,7 @@ pub extern "C" fn afsplus_aros_counters(
                 cache_blocks,
                 cache_hits: cache.hits,
                 cache_misses: cache.misses,
+                cache_decoded_hits: cache.decoded_hits,
             },
             |value, size| value.struct_size = size,
         )
@@ -2456,7 +2519,9 @@ pub extern "C" fn afsplus_aros_commit_due(
 const CACHE_BLOCKS_MAX: u64 = 1 << 20;
 
 /// Group CACHE: asks for a read cache of `blocks` device blocks, at most the
-/// volume's size and `CACHE_BLOCKS_MAX`; zero turns it off. The cache takes
+/// volume's size and `CACHE_BLOCKS_MAX`; zero turns it off. Half of them
+/// hold file data and the rest metadata, each its own least-recently-used
+/// set, so that reading files cannot evict the trees and records. The cache takes
 /// its memory at the next device access, and keeps its size when the memory
 /// cannot be had. `output_blocks` receives the size asked for, after those
 /// bounds; the counters report the size in force.
@@ -2470,7 +2535,13 @@ pub extern "C" fn afsplus_aros_set_cache_blocks(
         let bridge = bridge_mut(filesystem)?;
         let total = bridge.adapter.disk_info().total_blocks;
         let bounded = u64::from(blocks).min(total).min(CACHE_BLOCKS_MAX);
-        bridge.cache.request_capacity(bounded as usize);
+        // One budget, two pools: half for the blocks of file data, the
+        // rest for metadata, which data can then no longer push out. The
+        // memory the cache takes is what the same number took before.
+        let data = bounded as usize / 2;
+        bridge
+            .cache
+            .request_capacities(bounded as usize - data, data);
         write_output(output_blocks, bounded as u32)
     })
 }

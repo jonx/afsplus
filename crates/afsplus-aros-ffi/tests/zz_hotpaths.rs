@@ -17,13 +17,7 @@ const FILES: usize = 800;
 /// blocks the library read, from its cache or the device. `per` divides
 /// both when one call serves several entries. HOT=name loops that one
 /// body first, for a sampler.
-fn bench(
-    fs: *mut AfsplusAros,
-    name: &str,
-    calls: usize,
-    per: usize,
-    mut body: impl FnMut(usize),
-) {
+fn bench(fs: *mut AfsplusAros, name: &str, calls: usize, per: usize, mut body: impl FnMut(usize)) {
     let only = std::env::var("HOT").ok();
     if let Some(o) = &only {
         if o != name {
@@ -40,8 +34,11 @@ fn bench(
             i += 1;
         }
     }
-    // Once unmeasured: the first pass decodes what later passes find kept.
-    body(0);
+    // Unmeasured first, over every object the loop names: the first use
+    // decodes what later uses find kept.
+    for i in 0..calls.min(FILES) {
+        body(i);
+    }
     let before = reads(fs);
     let start = Instant::now();
     for i in 0..calls {
@@ -66,7 +63,7 @@ fn reads(fs: *mut AfsplusAros) -> (u64, u64) {
     };
     assert_eq!(afsplus_aros_counters(fs, &mut counters), 0);
     let copied = counters.cache_hits + counters.cache_misses;
-    (copied, copied)
+    (copied, copied + counters.cache_decoded_hits)
 }
 
 #[test]
@@ -174,6 +171,28 @@ fn hot_paths() {
         assert_eq!(afsplus_aros_free_lock(fs, drawer), 0);
     }
     assert_eq!(afsplus_aros_commit_due(fs, 100_000, 0, &mut pending), 0);
+    // A volume that has ever deleted a file has its orphan directory, and
+    // every stat asks it whether the object is a deleted one.
+    let doomed = b"deleted-once";
+    let mut file = 0;
+    assert_eq!(
+        afsplus_aros_open(
+            fs,
+            0,
+            doomed.as_ptr(),
+            doomed.len() as u32,
+            AFSPLUS_AROS_OPEN_NEW_FILE,
+            100_001,
+            0,
+            &mut file
+        ),
+        0
+    );
+    assert_eq!(afsplus_aros_close(fs, file), 0);
+    assert_eq!(
+        afsplus_aros_delete_object(fs, 0, doomed.as_ptr(), doomed.len() as u32, 100_002, 0),
+        0
+    );
     // The mount the handler offers with delayed commit (ADR-121): nothing
     // waits during the loops below, which only read.
     assert_eq!(afsplus_aros_set_commit_policy(fs, 5000, 1000), 0);

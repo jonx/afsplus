@@ -95,7 +95,7 @@ pub fn mount_sized(device: &mut MemoryBackend, total_blocks: u64) -> *mut Afsplu
         struct_size: size_of::<AfsplusArosDevice>() as u32,
         context: ptr::from_mut(device).cast::<c_void>(),
         block_size: BLOCK_SIZE as u32,
-        reserved: 0,
+        max_transfer_blocks: 0,
         total_blocks,
         read_block: Some(read_block),
         write_block: Some(write_block),

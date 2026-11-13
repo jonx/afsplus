@@ -181,8 +181,13 @@ pub fn validate_name(name: &[u8]) -> Result<(), FormatError> {
     if name.is_empty() || name.len() > NAME_MAX_UTF8_BYTES {
         return Err(FormatError::Invalid("name length out of range"));
     }
-    let s = core::str::from_utf8(name).map_err(|_| FormatError::InvalidUtf8)?;
-    if s.chars().any(|c| c == '\0' || c == '/') {
+    // Both reserved characters are ASCII, and no byte of a multi-byte UTF-8
+    // sequence is, so the bytes are searched as they are. ASCII is UTF-8
+    // and needs no decoding to say so.
+    if !name.is_ascii() {
+        core::str::from_utf8(name).map_err(|_| FormatError::InvalidUtf8)?;
+    }
+    if name.iter().any(|byte| matches!(byte, 0 | b'/')) {
         return Err(FormatError::Invalid("name contains reserved character"));
     }
     Ok(())

@@ -43,12 +43,59 @@ pub fn comparison_key(ident: &Identification, name: &[u8]) -> Result<Vec<u8>, Co
     Ok(key)
 }
 
+/// A comparison key that lives in the caller's frame when it is short, as
+/// the key of nearly every name is: a lookup builds one for each component
+/// of a path, and a heap block for each was most of what a lookup allocated.
+pub enum KeyBuf {
+    Inline { len: u8, bytes: [u8; KEY_INLINE] },
+    Heap(Vec<u8>),
+}
+
+/// Key bytes kept without a heap block.
+pub const KEY_INLINE: usize = 96;
+
+impl core::ops::Deref for KeyBuf {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            KeyBuf::Inline { len, bytes } => &bytes[..*len as usize],
+            KeyBuf::Heap(key) => key,
+        }
+    }
+}
+
+/// [`comparison_key`], the same bytes, without a heap block for a short
+/// ASCII name.
+pub fn comparison_key_buf(ident: &Identification, name: &[u8]) -> Result<KeyBuf, CoreError> {
+    if name.len() <= KEY_INLINE && name.is_ascii() {
+        let fold = match ident.name_key_algorithm {
+            NameKeyAlgorithm::LegacyIdentity | NameKeyAlgorithm::UnicodeNfc => false,
+            NameKeyAlgorithm::UnicodeNfcCasefold => true,
+        };
+        validate_name(name).map_err(CoreError::InvalidName)?;
+        let mut bytes = [0u8; KEY_INLINE];
+        for (to, from) in bytes.iter_mut().zip(name) {
+            *to = if fold {
+                from.to_ascii_lowercase()
+            } else {
+                *from
+            };
+        }
+        return Ok(KeyBuf::Inline {
+            len: name.len() as u8,
+            bytes,
+        });
+    }
+    comparison_key(ident, name).map(KeyBuf::Heap)
+}
+
 pub fn validate_entry_key(
     ident: &Identification,
     key: &[u8],
     name: &[u8],
 ) -> Result<(), CoreError> {
-    if key != comparison_key(ident, name)? {
+    if key != &*comparison_key_buf(ident, name)? {
         return Err(CoreError::Corrupt(
             "directory comparison key does not match original name".into(),
         ));

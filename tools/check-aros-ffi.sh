@@ -121,6 +121,14 @@ clang -std=c11 -Wall -Wextra -Werror \
     -o "$task_dir/packet-stub"
 "$task_dir/packet-stub"
 
+echo "[aros-ffi] host delayed-commit tick rule"
+clang -std=c11 -Wall -Wextra -Werror \
+    -D__WORDSIZE=64 -DAROS_FAST_BPTR=1 -DAROS_FAST_BSTR=1 \
+    -I "$aros_stdc_include" -I "$aros_include" -I "$aros_gen_include" \
+    -I api -I native/aros \
+    native/aros/tests/commit_tick_stub.c -o "$task_dir/commit-tick-stub"
+"$task_dir/commit-tick-stub"
+
 echo "[aros-ffi] host restore and reclaim command diagnostics"
 python3 native/aros/tests/restore_diagnostics_host.py
 python3 native/aros/tests/reclaim_cli_host.py

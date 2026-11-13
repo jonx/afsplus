@@ -39,6 +39,9 @@ struct AfsplusArosTrackdiskConfig {
     uint32_t write_command;
     uint32_t supports_64bit_offsets;
     uint32_t read_only;
+    /* Most logical blocks one transfer may carry; zero means one. A read or
+     * write of a run of blocks is one call of `transfer` up to this bound. */
+    uint32_t max_transfer_blocks;
     /* Optional fixed-size activity events for a virtual drive LED. */
     struct afsp_io_activity_sink activity;
 };
@@ -55,19 +58,20 @@ struct AfsplusArosTrackdisk {
     uint32_t write_command;
     uint32_t supports_64bit_offsets;
     uint32_t read_only;
+    uint32_t max_transfer_blocks;
     struct afsp_io_activity_sink activity;
 };
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(struct AfsplusArosTrackdiskConfig) == 96,
+_Static_assert(sizeof(struct AfsplusArosTrackdiskConfig) == 104,
     "AfsplusArosTrackdiskConfig 64-bit ABI drift");
 _Static_assert(sizeof(struct AfsplusArosTrackdisk) == 96,
     "AfsplusArosTrackdisk 64-bit ABI drift");
 #elif UINTPTR_MAX == UINT32_MAX
-_Static_assert(sizeof(struct AfsplusArosTrackdiskConfig) == 72,
+_Static_assert(sizeof(struct AfsplusArosTrackdiskConfig) == 76,
     "AfsplusArosTrackdiskConfig 32-bit ABI drift");
-_Static_assert(sizeof(struct AfsplusArosTrackdisk) == 68,
+_Static_assert(sizeof(struct AfsplusArosTrackdisk) == 72,
     "AfsplusArosTrackdisk 32-bit ABI drift");
 #endif
 #endif

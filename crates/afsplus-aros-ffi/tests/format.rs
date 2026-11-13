@@ -57,7 +57,7 @@ fn callbacks(device: &mut Device) -> AfsplusArosDevice {
         struct_size: size_of::<AfsplusArosDevice>() as u32,
         context: ptr::from_mut(device).cast(),
         block_size: 4096,
-        reserved: 0,
+        max_transfer_blocks: 0,
         total_blocks: 2048,
         read_block: Some(read),
         write_block: Some(write),

@@ -54,8 +54,10 @@ pub fn encode_tree_entry_value(entry: &DirEntry) -> Result<Vec<u8>, FormatError>
     Ok(value)
 }
 
-/// Decode one leaf value stored under `key`.
-pub fn decode_tree_entry_value(key: &[u8], value: &[u8]) -> Result<DirEntry, FormatError> {
+/// The fields of one leaf value where they lie: the name, the child type
+/// hint and the child object ID. Only the layout is checked here; what the
+/// fields may hold is [`decode_tree_entry_value`]'s to check.
+pub fn tree_entry_parts(value: &[u8]) -> Result<(&[u8], u8, u64), FormatError> {
     if value.len() < TREE_ENTRY_FIXED {
         return Err(FormatError::Invalid("directory leaf value is truncated"));
     }
@@ -68,11 +70,21 @@ pub fn decode_tree_entry_value(key: &[u8], value: &[u8]) -> Result<DirEntry, For
             "directory leaf reserved bytes are nonzero",
         ));
     }
+    Ok((
+        &value[TREE_ENTRY_FIXED..],
+        value[2],
+        le::get_u64(&value[8..16]),
+    ))
+}
+
+/// Decode one leaf value stored under `key`.
+pub fn decode_tree_entry_value(key: &[u8], value: &[u8]) -> Result<DirEntry, FormatError> {
+    let (name, child_type_hint, child_id) = tree_entry_parts(value)?;
     let entry = DirEntry {
         key: key.to_vec(),
-        name: value[TREE_ENTRY_FIXED..].to_vec(),
-        child_type_hint: value[2],
-        child_id: le::get_u64(&value[8..16]),
+        name: name.to_vec(),
+        child_type_hint,
+        child_id,
     };
     validate_tree_entry(&entry)?;
     Ok(entry)

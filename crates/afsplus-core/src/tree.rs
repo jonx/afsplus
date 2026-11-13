@@ -6,7 +6,6 @@ use std::sync::Arc;
 use afsplus_block::BlockDevice;
 use afsplus_format::geometry::Geometry;
 use afsplus_format::header::{block_type, BlockHeader};
-use afsplus_format::small_bytes::SmallBytes;
 use afsplus_format::tree::{TreeKind, TreeNode, MAX_TREE_KEY_BYTES, MAX_TREE_LEVEL};
 
 use crate::CoreError;
@@ -77,9 +76,13 @@ impl DescentPath {
 
 /// A tree node decoded from the bytes of block `lba`, which the device kept
 /// beside them. A write of the block drops it.
-struct KeptNode {
-    node: Arc<TreeNode>,
-    generation: u64,
+pub(crate) struct KeptNode {
+    pub(crate) node: Arc<TreeNode>,
+    pub(crate) generation: u64,
+    /// What a typed adapter derived from this node alone, such as the
+    /// decoded entries of a directory leaf. It lives and dies with the
+    /// node, so it is never older than the bytes it was derived from.
+    pub(crate) derived: std::sync::OnceLock<afsplus_block::Decoded>,
 }
 
 /// Decodes tree node `lba` from `buf`, the bytes just read from it. A block
@@ -87,11 +90,11 @@ struct KeptNode {
 /// decoded node, it is used as it is. With the `verify-cached-metadata`
 /// feature the bytes are checked again first, at the cost of a CRC32C of
 /// the block on every read.
-pub(crate) fn decode_node<D: BlockDevice>(
+fn decode_kept<D: BlockDevice>(
     dev: &mut D,
     lba: u64,
     buf: &[u8],
-) -> Result<(Arc<TreeNode>, u64), CoreError> {
+) -> Result<Arc<KeptNode>, CoreError> {
     if let Some(kept) = dev
         .attached(lba)
         .and_then(|value| value.downcast::<KeptNode>().ok())
@@ -100,19 +103,142 @@ pub(crate) fn decode_node<D: BlockDevice>(
             BlockHeader::verify(buf, block_type::TREE_NODE)
                 .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
         }
-        return Ok((Arc::clone(&kept.node), kept.generation));
+        return Ok(kept);
     }
     let (node, generation) = TreeNode::decode(buf)
         .map_err(|error| CoreError::Corrupt(format!("tree node {lba}: {error}")))?;
-    let node = Arc::new(node);
-    dev.attach(
-        lba,
-        Arc::new(KeptNode {
-            node: Arc::clone(&node),
-            generation,
-        }),
-    );
-    Ok((node, generation))
+    let kept = Arc::new(KeptNode {
+        node: Arc::new(node),
+        generation,
+        derived: std::sync::OnceLock::new(),
+    });
+    dev.attach(lba, Arc::clone(&kept) as afsplus_block::Decoded);
+    Ok(kept)
+}
+
+/// Tree node `lba`, decoded. The device is asked for the decoded form it
+/// keeps before it is asked for bytes: a kept node was checked when it was
+/// decoded and is dropped by any write of its block, so the 4 KiB its bytes
+/// would cost to copy out of the cache buy nothing. With the
+/// `verify-cached-metadata` feature the bytes are read and checked on every
+/// visit, as before.
+pub(crate) fn load_node<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    lba: u64,
+) -> Result<Arc<KeptNode>, CoreError> {
+    if !cfg!(feature = "verify-cached-metadata") {
+        if let Some(kept) = dev
+            .decoded(lba)
+            .and_then(|value| value.downcast::<KeptNode>().ok())
+        {
+            return Ok(kept);
+        }
+    }
+    let mut buf = crate::scratch::Block::take(geo.block_size);
+    dev.read_block(lba, &mut buf)?;
+    decode_kept(dev, lba, &buf)
+}
+
+/// A separator key of a node the descent holds: the bound it places on the
+/// nodes below is read where it lies instead of being copied.
+#[derive(Clone, Copy)]
+struct Bound {
+    depth: usize,
+    index: usize,
+}
+
+/// The nodes of one descent, root first.
+struct Ancestors {
+    nodes: [Option<Arc<KeptNode>>; MAX_TREE_LEVEL as usize + 1],
+}
+
+impl Ancestors {
+    fn new() -> Self {
+        Ancestors {
+            nodes: std::array::from_fn(|_| None),
+        }
+    }
+
+    fn key(&self, bound: Option<Bound>) -> Option<&[u8]> {
+        let bound = bound?;
+        let node = self.nodes[bound.depth].as_ref()?;
+        Some(node.node.items[bound.index].key.as_slice())
+    }
+}
+
+/// Descends to the leaf whose range holds `key`, checking every node on the
+/// way as [`lookup`] documents.
+pub(crate) fn find_leaf<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    spec: TreeSpec,
+    key: &[u8],
+) -> Result<(Arc<KeptNode>, TreeLookupStats), CoreError> {
+    if key.is_empty() || key.len() > MAX_TREE_KEY_BYTES {
+        return Err(CoreError::Corrupt(
+            "tree lookup key length out of range".into(),
+        ));
+    }
+    check_tree_lba(geo, root_lba)?;
+    let mut lba = root_lba;
+    let mut expected_level = None;
+    let mut lower: Option<Bound> = None;
+    let mut upper: Option<Bound> = None;
+    let mut visited = DescentPath::default();
+    let mut ancestors = Ancestors::new();
+    let mut stats = TreeLookupStats {
+        pages_read: 0,
+        peak_page_buffers: 2,
+    };
+
+    for depth in 0..=MAX_TREE_LEVEL as usize {
+        if !visited.insert(lba) {
+            return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
+        }
+        let kept = load_node(dev, geo, lba)?;
+        stats.pages_read += 1;
+        let node = &kept.node;
+        validate_node_identity(node, kept.generation, spec, expected_level, lba)?;
+        validate_node_range(node, ancestors.key(lower), ancestors.key(upper), depth == 0)?;
+
+        if node.is_leaf() {
+            return Ok((kept, stats));
+        }
+
+        let separator_index = node
+            .items
+            .partition_point(|item| item.key.as_slice() <= key);
+        let child = if separator_index == 0 {
+            if !node.items.is_empty() {
+                upper = Some(Bound { depth, index: 0 });
+            }
+            afsplus_format::tree::ChildRef {
+                lba: node.leftmost_child,
+                subtree_items: node.leftmost_items,
+            }
+        } else {
+            lower = Some(Bound {
+                depth,
+                index: separator_index - 1,
+            });
+            if separator_index < node.items.len() {
+                upper = Some(Bound {
+                    depth,
+                    index: separator_index,
+                });
+            }
+            TreeNode::child_ref(&node.items[separator_index - 1]).map_err(CoreError::Format)?
+        };
+        check_tree_lba(geo, child.lba)?;
+        lba = child.lba;
+        expected_level = Some(node.level - 1);
+        ancestors.nodes[depth] = Some(kept);
+    }
+    Err(CoreError::Corrupt(
+        "tree traversal exceeded maximum depth".into(),
+    ))
 }
 
 /// Looks up one binary key with a two-page-equivalent working set.
@@ -123,65 +249,26 @@ pub fn lookup<D: BlockDevice>(
     spec: TreeSpec,
     key: &[u8],
 ) -> Result<(Option<Vec<u8>>, TreeLookupStats), CoreError> {
-    if key.is_empty() || key.len() > MAX_TREE_KEY_BYTES {
-        return Err(CoreError::Corrupt(
-            "tree lookup key length out of range".into(),
-        ));
-    }
-    check_tree_lba(geo, root_lba)?;
-    let mut lba = root_lba;
-    let mut expected_level = None;
-    let mut lower: Option<SmallBytes> = None;
-    let mut upper: Option<SmallBytes> = None;
-    let mut visited = DescentPath::default();
-    let mut buf = crate::scratch::Block::take(geo.block_size);
-    let mut stats = TreeLookupStats {
-        pages_read: 0,
-        peak_page_buffers: 2,
-    };
+    lookup_with(dev, geo, root_lba, spec, key, <[u8]>::to_vec)
+}
 
-    for depth in 0..=MAX_TREE_LEVEL {
-        if !visited.insert(lba) {
-            return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
-        }
-        dev.read_block(lba, &mut buf)?;
-        stats.pages_read += 1;
-        let (node, generation) = decode_node(dev, lba, &buf)?;
-        validate_node_identity(&node, generation, spec, expected_level, lba)?;
-        validate_node_range(&node, lower.as_deref(), upper.as_deref(), depth == 0)?;
-
-        if node.is_leaf() {
-            let value = node
-                .items
-                .binary_search_by(|item| item.key.as_slice().cmp(key))
-                .ok()
-                .map(|index| node.items[index].value.to_vec());
-            return Ok((value, stats));
-        }
-
-        let separator_index = node
-            .items
-            .partition_point(|item| item.key.as_slice() <= key);
-        let child = if separator_index == 0 {
-            upper = node.items.first().map(|item| item.key.clone());
-            afsplus_format::tree::ChildRef {
-                lba: node.leftmost_child,
-                subtree_items: node.leftmost_items,
-            }
-        } else {
-            lower = Some(node.items[separator_index - 1].key.clone());
-            if let Some(next_separator) = node.items.get(separator_index) {
-                upper = Some(next_separator.key.clone());
-            }
-            TreeNode::child_ref(&node.items[separator_index - 1]).map_err(CoreError::Format)?
-        };
-        check_tree_lba(geo, child.lba)?;
-        lba = child.lba;
-        expected_level = Some(node.level - 1);
-    }
-    Err(CoreError::Corrupt(
-        "tree traversal exceeded maximum depth".into(),
-    ))
+/// [`lookup`] that hands the stored value to `read` where it lies, for a
+/// caller that decodes it and wants no copy of it.
+pub fn lookup_with<D: BlockDevice, R>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    spec: TreeSpec,
+    key: &[u8],
+    read: impl FnOnce(&[u8]) -> R,
+) -> Result<(Option<R>, TreeLookupStats), CoreError> {
+    let (leaf, stats) = find_leaf(dev, geo, root_lba, spec, key)?;
+    let items = &leaf.node.items;
+    let value = items
+        .binary_search_by(|item| item.key.as_slice().cmp(key))
+        .ok()
+        .map(|index| read(items[index].value.as_slice()));
+    Ok((value, stats))
 }
 
 /// Finds the greatest stored key less than or equal to `key` with the same
@@ -194,69 +281,28 @@ pub fn lookup_floor<D: BlockDevice>(
     spec: TreeSpec,
     key: &[u8],
 ) -> Result<(Option<TreeFloorItem>, TreeLookupStats), CoreError> {
-    if key.is_empty() || key.len() > MAX_TREE_KEY_BYTES {
-        return Err(CoreError::Corrupt(
-            "tree lookup key length out of range".into(),
-        ));
-    }
-    check_tree_lba(geo, root_lba)?;
-    let mut lba = root_lba;
-    let mut expected_level = None;
-    let mut lower: Option<SmallBytes> = None;
-    let mut upper: Option<SmallBytes> = None;
-    let mut visited = DescentPath::default();
-    let mut buf = crate::scratch::Block::take(geo.block_size);
-    let mut stats = TreeLookupStats {
-        pages_read: 0,
-        peak_page_buffers: 2,
-    };
+    lookup_floor_with(dev, geo, root_lba, spec, key, |key, value| {
+        (key.to_vec(), value.to_vec())
+    })
+}
 
-    for depth in 0..=MAX_TREE_LEVEL {
-        if !visited.insert(lba) {
-            return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
-        }
-        dev.read_block(lba, &mut buf)?;
-        stats.pages_read += 1;
-        let (node, generation) = decode_node(dev, lba, &buf)?;
-        validate_node_identity(&node, generation, spec, expected_level, lba)?;
-        validate_node_range(&node, lower.as_deref(), upper.as_deref(), depth == 0)?;
-
-        if node.is_leaf() {
-            let position = node
-                .items
-                .partition_point(|item| item.key.as_slice() <= key);
-            let value = position.checked_sub(1).map(|index| {
-                (
-                    node.items[index].key.to_vec(),
-                    node.items[index].value.to_vec(),
-                )
-            });
-            return Ok((value, stats));
-        }
-
-        let separator_index = node
-            .items
-            .partition_point(|item| item.key.as_slice() <= key);
-        let child = if separator_index == 0 {
-            upper = node.items.first().map(|item| item.key.clone());
-            afsplus_format::tree::ChildRef {
-                lba: node.leftmost_child,
-                subtree_items: node.leftmost_items,
-            }
-        } else {
-            lower = Some(node.items[separator_index - 1].key.clone());
-            if let Some(next_separator) = node.items.get(separator_index) {
-                upper = Some(next_separator.key.clone());
-            }
-            TreeNode::child_ref(&node.items[separator_index - 1]).map_err(CoreError::Format)?
-        };
-        check_tree_lba(geo, child.lba)?;
-        lba = child.lba;
-        expected_level = Some(node.level - 1);
-    }
-    Err(CoreError::Corrupt(
-        "tree traversal exceeded maximum depth".into(),
-    ))
+/// [`lookup_floor`] that hands the stored key and value to `read` where
+/// they lie.
+pub fn lookup_floor_with<D: BlockDevice, R>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    spec: TreeSpec,
+    key: &[u8],
+    read: impl FnOnce(&[u8], &[u8]) -> R,
+) -> Result<(Option<R>, TreeLookupStats), CoreError> {
+    let (leaf, stats) = find_leaf(dev, geo, root_lba, spec, key)?;
+    let items = &leaf.node.items;
+    let position = items.partition_point(|item| item.key.as_slice() <= key);
+    let value = position
+        .checked_sub(1)
+        .map(|index| read(items[index].key.as_slice(), items[index].value.as_slice()));
+    Ok((value, stats))
 }
 
 /// Reads a bounded ordinal range of leaf items. Subtree counters let the
@@ -270,13 +316,37 @@ pub fn read_range<D: BlockDevice>(
     start: u64,
     limit: usize,
 ) -> Result<TreeRangePage, CoreError> {
-    check_tree_lba(geo, root_lba)?;
     let mut items = Vec::with_capacity(limit);
-    let mut path = DescentPath::default();
-    let total_items = read_range_node(
-        dev, geo, root_lba, spec, None, None, None, true, start, limit, &mut path, &mut items,
-    )?;
+    let total_items = visit_range(dev, geo, root_lba, spec, start, limit, |leaf, index| {
+        let item = &leaf.node.items[index];
+        items.push((item.key.to_vec(), item.value.to_vec()));
+        Ok(())
+    })?;
     Ok(TreeRangePage { items, total_items })
+}
+
+/// [`read_range`] that hands each item to `visit` as its leaf and its place
+/// in it, and returns the tree's item count.
+pub(crate) fn visit_range<D, F>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    spec: TreeSpec,
+    start: u64,
+    limit: usize,
+    mut visit: F,
+) -> Result<u64, CoreError>
+where
+    D: BlockDevice,
+    F: FnMut(&KeptNode, usize) -> Result<(), CoreError>,
+{
+    check_tree_lba(geo, root_lba)?;
+    let mut path = DescentPath::default();
+    let mut taken = 0usize;
+    read_range_node(
+        dev, geo, root_lba, spec, None, None, None, true, start, limit, &mut path, &mut taken,
+        &mut visit,
+    )
 }
 
 /// Reads at most `limit` entries starting at an inclusive binary key.
@@ -326,13 +396,12 @@ fn read_key_page_node<D: BlockDevice>(
         return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
     }
     let result = (|| {
-        let mut buf = vec![0; geo.block_size];
-        dev.read_block(lba, &mut buf)?;
+        let kept = load_node(dev, geo, lba)?;
         stats.pages_read += 1;
         stats.peak_page_buffers = stats.peak_page_buffers.max((path.len() * 2) as u8);
-        let (node, generation) = decode_node(dev, lba, &buf)?;
-        validate_node_identity(&node, generation, spec, expected_level, lba)?;
-        validate_node_range(&node, lower, upper, expected_level.is_none())?;
+        let (node, generation) = (&kept.node, kept.generation);
+        validate_node_identity(node, generation, spec, expected_level, lba)?;
+        validate_node_range(node, lower, upper, expected_level.is_none())?;
         if out.len() >= limit {
             return Ok(node.subtree_items);
         }
@@ -401,7 +470,7 @@ fn read_key_page_node<D: BlockDevice>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn read_range_node<D: BlockDevice>(
+fn read_range_node<D, F>(
     dev: &mut D,
     geo: &Geometry,
     lba: u64,
@@ -413,37 +482,39 @@ fn read_range_node<D: BlockDevice>(
     mut start: u64,
     limit: usize,
     path: &mut DescentPath,
-    out: &mut Vec<(Vec<u8>, Vec<u8>)>,
-) -> Result<u64, CoreError> {
+    taken: &mut usize,
+    visit: &mut F,
+) -> Result<u64, CoreError>
+where
+    D: BlockDevice,
+    F: FnMut(&KeptNode, usize) -> Result<(), CoreError>,
+{
     if !path.insert(lba) {
         return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
     }
     let result = (|| {
-        let mut buf = crate::scratch::Block::take(geo.block_size);
-        dev.read_block(lba, &mut buf)?;
-        let (node, generation) = decode_node(dev, lba, &buf)?;
-        validate_node_identity(&node, generation, spec, expected_level, lba)?;
-        validate_node_range(&node, lower, upper, is_root)?;
+        let kept = load_node(dev, geo, lba)?;
+        let (node, generation) = (&kept.node, kept.generation);
+        validate_node_identity(node, generation, spec, expected_level, lba)?;
+        validate_node_range(node, lower, upper, is_root)?;
         let total = node.subtree_items;
-        if start >= total || out.len() >= limit {
+        if start >= total || *taken >= limit {
             return Ok(total);
         }
 
         if node.is_leaf() {
             let first = usize::try_from(start)
                 .map_err(|_| CoreError::Corrupt("leaf ordinal does not fit memory".into()))?;
-            let take = limit.saturating_sub(out.len());
-            out.extend(
-                node.items[first..]
-                    .iter()
-                    .take(take)
-                    .map(|item| (item.key.to_vec(), item.value.to_vec())),
-            );
+            let end = node.items.len().min(first + (limit - *taken));
+            for index in first..end {
+                visit(&kept, index)?;
+                *taken += 1;
+            }
             return Ok(total);
         }
 
         for child_index in 0..=node.items.len() {
-            if out.len() >= limit {
+            if *taken >= limit {
                 break;
             }
             let child = if child_index == 0 {
@@ -481,7 +552,8 @@ fn read_range_node<D: BlockDevice>(
                 start,
                 limit,
                 path,
-                out,
+                taken,
+                visit,
             )?;
             if actual != child.subtree_items {
                 return Err(CoreError::Corrupt(format!(
@@ -561,11 +633,10 @@ where
         return Err(CoreError::Corrupt(format!("tree cycle at block {lba}")));
     }
     let result = (|| {
-        let mut buf = crate::scratch::Block::take(geo.block_size);
-        dev.read_block(lba, &mut buf)?;
-        let (node, generation) = decode_node(dev, lba, &buf)?;
-        validate_node_identity(&node, generation, spec, expected_level, lba)?;
-        validate_node_range(&node, lower, upper, is_root)?;
+        let kept = load_node(dev, geo, lba)?;
+        let (node, generation) = (&kept.node, kept.generation);
+        validate_node_identity(node, generation, spec, expected_level, lba)?;
+        validate_node_range(node, lower, upper, is_root)?;
 
         if node.is_leaf() {
             for item in &node.items {

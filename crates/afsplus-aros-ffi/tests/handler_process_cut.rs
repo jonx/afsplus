@@ -103,7 +103,7 @@ fn mount(device: &mut Device) -> *mut AfsplusAros {
         struct_size: size_of::<AfsplusArosDevice>() as u32,
         context: ptr::from_mut(device).cast(),
         block_size: BLOCK as u32,
-        reserved: 0,
+        max_transfer_blocks: 0,
         total_blocks: BLOCKS,
         read_block: Some(read),
         write_block: Some(write),

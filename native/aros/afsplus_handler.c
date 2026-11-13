@@ -38,6 +38,7 @@
 #include <stdint.h>
 
 #include "afsplus_claim.h"
+#include "afsplus_commit_tick.h"
 #include "afsplus_control.h"
 #include "afsplus_packet.h"
 #include "afsplus_trackdisk.h"
@@ -120,6 +121,11 @@ struct AfsplusArosHandler {
     uint32_t commit_named;
     uint32_t commit_delayed;
     uint32_t commit_pending;
+    /* Whether a packet that may have changed the volume arrived since the
+     * library was last asked what is due, and how many batches asked
+     * nothing since; see afsplus_commit_tick.h. */
+    uint32_t commit_changed;
+    uint32_t commit_quiet;
     /* A mount made before timer.device can be opened runs SYNC. It is right
      * and only slower, so the mount succeeds; these two carry the later
      * attempt to get the clock after all, and whether it worked. */
@@ -321,7 +327,12 @@ static void run_wait_timer(struct AfsplusArosHandler *handler)
         afsplus_aros_packet_elapsed(handler->packets,
             AFSPLUS_AROS_WAIT_STEP_TICKS);
     }
-    if (handler->commit_delayed)
+    /* Packets that only read have given the library nothing to commit:
+     * such a batch reads no clock and makes no call (afsplus_commit_tick.h
+     * has the rule and why the bounds of ADR-121 stand). */
+    if (handler->commit_delayed
+        && afsplus_commit_tick_due(handler->commit_pending,
+            handler->commit_changed, &handler->commit_quiet))
     {
         int64_t seconds;
         uint32_t nanoseconds;
@@ -333,6 +344,7 @@ static void run_wait_timer(struct AfsplusArosHandler *handler)
             (void)afsplus_aros_commit_due(handler->filesystem, seconds,
                 nanoseconds, &pending);
         handler->commit_pending = pending;
+        handler->commit_changed = 0;
     }
     if (!handler->timer_pending
         && (afsplus_aros_packet_waiting(handler->packets) != 0
@@ -356,7 +368,11 @@ static int32_t apply_commit_policy(struct AfsplusArosHandler *handler)
         handler->commit_seconds * UINT32_C(1000), UINT32_C(1000));
 
     if (error == 0)
+    {
         handler->commit_delayed = 1;
+        /* The first batch asks, whatever it holds. */
+        handler->commit_changed = 1;
+    }
     return error;
 }
 
@@ -608,8 +624,28 @@ static int32_t device_transfer(void *context, uint32_t command,
         return ERROR_BAD_NUMBER;
     if (!buffer_matches_mask(handler, buffer, length))
     {
-        if (handler->bounce == NULL || length > handler->bounce_size)
+        if (handler->bounce == NULL)
             return ERROR_NO_FREE_STORE;
+        /* A run the device cannot take where it lies goes through the
+         * bounce buffer a piece at a time, in order. */
+        if (length > handler->bounce_size)
+        {
+            uint32_t done = 0;
+
+            while (done < length)
+            {
+                uint32_t piece = length - done < handler->bounce_size
+                    ? length - done : handler->bounce_size;
+                int32_t error = device_transfer(context, command,
+                    byte_offset + done, (uint8_t *)buffer + done, piece,
+                    writing);
+
+                if (error != 0)
+                    return error;
+                done += piece;
+            }
+            return 0;
+        }
         io_buffer = handler->bounce;
         if (writing)
             memcpy(io_buffer, buffer, length);
@@ -903,6 +939,27 @@ static int32_t open_device(struct AfsplusArosHandler *handler)
     return require_media(handler);
 }
 
+/*
+ * The most blocks one device request carries: the DOSDriver's MaxTransfer,
+ * in whole blocks, and never more than AFSPLUS_MAX_TRANSFER_BLOCKS, which
+ * also stands when the DOSDriver names none. setup_dma_bounce has refused a
+ * MaxTransfer below one block.
+ */
+#define AFSPLUS_MAX_TRANSFER_BLOCKS UINT32_C(256)
+
+static uint32_t max_transfer_blocks(const struct DosEnvec *environment)
+{
+    uint64_t blocks = AFSPLUS_MAX_TRANSFER_BLOCKS;
+
+    if ((SIPTR)environment->de_TableSize >= DE_MAXTRANSFER
+        && environment->de_MaxTransfer != 0
+        && (uint64_t)environment->de_MaxTransfer
+            / AFSPLUS_AROS_ALPHA0_BLOCK_SIZE < blocks)
+        blocks = (uint64_t)environment->de_MaxTransfer
+            / AFSPLUS_AROS_ALPHA0_BLOCK_SIZE;
+    return blocks != 0 ? (uint32_t)blocks : 1;
+}
+
 static int32_t prepare_filesystem(struct AfsplusArosHandler *handler)
 {
     struct ExecBase *SysBase = handler->SysBase;
@@ -960,6 +1017,7 @@ static int32_t prepare_filesystem(struct AfsplusArosHandler *handler)
     trackdisk_config.supports_64bit_offsets =
         handler->supports_64bit_offsets;
     trackdisk_config.read_only = handler->read_only;
+    trackdisk_config.max_transfer_blocks = max_transfer_blocks(environment);
     set_startup_stage(handler, "trackdisk-adapter");
     error = afsplus_aros_trackdisk_init(&trackdisk_config,
         &handler->trackdisk, &handler->device);
@@ -1837,6 +1895,8 @@ static LONG handler_main(struct ExecBase *SysBase, struct DosPacket **death,
             afsplus_aros_startup_trace(SysBase, UINT32_C(0x40000000) |
                 ((uint32_t)packet->dp_Type & UINT32_C(0x0fffffff)));
             retry_commit_policy(state);
+            if (!afsplus_commit_tick_reads_only(packet->dp_Type))
+                state->commit_changed = 1;
             error = afsplus_aros_packet_process(state->packets, packet);
             /* Kept by the packet layer: packet_complete replies later. */
             if (error == AFSPLUS_AROS_PACKET_DEFERRED)

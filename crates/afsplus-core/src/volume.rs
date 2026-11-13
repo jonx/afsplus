@@ -312,8 +312,28 @@ impl CommitData<'_> {
     fn write_to<D: BlockDevice>(self, dev: &mut D) -> Result<(), CoreError> {
         match self {
             Self::Prepared(writes) => {
-                for (lba, block) in writes {
-                    dev.write_block(lba, &block)?;
+                // Blocks that follow one another on the device are one
+                // transfer: the same blocks in the same order.
+                let mut run = Vec::new();
+                let mut at = 0;
+                while at < writes.len() {
+                    let mut end = at + 1;
+                    while end < writes.len()
+                        && writes[end].0 == writes[at].0 + (end - at) as u64
+                        && writes[end].1.len() == writes[at].1.len()
+                    {
+                        end += 1;
+                    }
+                    if end == at + 1 {
+                        dev.write_blocks(writes[at].0, &writes[at].1)?;
+                    } else {
+                        run.clear();
+                        for (_, block) in &writes[at..end] {
+                            run.extend_from_slice(block);
+                        }
+                        dev.write_blocks(writes[at].0, &run)?;
+                    }
+                    at = end;
                 }
             }
             Self::Borrowed(runs) => {
@@ -322,16 +342,18 @@ impl CommitData<'_> {
                 // one block for zero-padded tails and reuse it across files.
                 let mut tail = Vec::new();
                 for (start, bytes) in runs {
-                    let mut chunks = bytes.chunks_exact(block_size);
-                    for (offset, chunk) in chunks.by_ref().enumerate() {
-                        dev.write_block(start + offset as u64, chunk)?;
+                    // The whole blocks of a run are one transfer: the same
+                    // blocks in the same order, before the same barrier.
+                    let whole = bytes.len() / block_size * block_size;
+                    if whole != 0 {
+                        dev.write_blocks(start, &bytes[..whole])?;
                     }
-                    let remainder = chunks.remainder();
+                    let remainder = &bytes[whole..];
                     if !remainder.is_empty() {
                         tail.resize(block_size, 0);
                         tail.fill(0);
                         tail[..remainder.len()].copy_from_slice(remainder);
-                        dev.write_block(start + (bytes.len() / block_size) as u64, &tail)?;
+                        dev.write_blocks(start + (bytes.len() / block_size) as u64, &tail)?;
                     }
                 }
             }
@@ -404,6 +426,11 @@ struct OpenWindow {
     unloggable: bool,
 }
 
+/// A run of at most this many blocks that a read wants only part of the
+/// first or the last block of is read whole into a buffer of the volume's,
+/// in one device request, instead of in up to three.
+const RAGGED_RUN_BLOCKS: u64 = 16;
+
 /// Largest file created in a window that later writes may still rewrite in
 /// place of a commit; beyond it the caller commits the window first.
 pub const WINDOW_CREATED_REWRITE_MAX: u64 = 256 * 1024;
@@ -470,6 +497,101 @@ pub struct Volume<D: BlockDevice> {
     snapshot_limits: Option<SnapshotWorkLimits>,
     snapshot_handles: BTreeMap<u64, Weak<()>>,
     snapshot_mount: Arc<()>,
+    /// Where the committed object map places the records asked for last.
+    object_memo: ObjectMemo,
+    /// The committed tree, by checkpoint generation and object-map root,
+    /// under which the orphan directory was last found empty, and the block
+    /// of its record. Like [`ObjectMemo`], it names one committed tree,
+    /// which never changes, and says nothing under any other.
+    no_orphans: Option<(u64, u64, u64)>,
+}
+
+/// Object ID to record block, as the committed object map answered it.
+///
+/// The table belongs to one committed tree, named by the checkpoint
+/// generation and the map's root block: under any other pair it is empty.
+/// A committed tree never changes, because every change writes new blocks
+/// and publishes them through a new checkpoint, so while the pair stands an
+/// answer cannot differ from the descent that produced it, whether it is a
+/// block or that the map has no such object. The record
+/// itself is not kept here: a hit still takes it from the device, which
+/// holds it decoded beside the block's bytes and drops it on any write.
+///
+/// A debug build makes the descent as well on every hit and requires the
+/// same answer, so every test that reads an object checks the table.
+struct ObjectMemo {
+    generation: u64,
+    map_root: u64,
+    /// The device capacity the table was sized for.
+    capacity: usize,
+    /// `(object ID, record block)`, at the ID's slot; ID zero is empty.
+    entries: Vec<(u64, u64)>,
+}
+
+/// The record block the table holds for an object the map does not have.
+/// No record lies in block zero, which the object map refuses as a value.
+const OBJECT_MEMO_ABSENT: u64 = 0;
+
+/// Most entries the table takes, at 16 bytes each: 1 MiB.
+const OBJECT_MEMO_MAX_ENTRIES: usize = 1 << 16;
+
+impl ObjectMemo {
+    /// A table for a device that keeps the decoded form of `blocks` blocks:
+    /// one entry a block, since a block holds one record, rounded up to a
+    /// power of two. That is under 1 % of what such a cache holds. A device
+    /// that keeps nothing gets no table.
+    fn for_capacity(blocks: usize) -> Self {
+        let entries = match blocks {
+            0 => 0,
+            blocks => blocks.clamp(2, OBJECT_MEMO_MAX_ENTRIES).next_power_of_two(),
+        };
+        // Memory that cannot be had leaves the table empty, and every
+        // read takes the descent.
+        let mut table = Vec::new();
+        if table.try_reserve_exact(entries).is_ok() {
+            table.resize(entries, (0, 0));
+        }
+        ObjectMemo {
+            generation: 0,
+            map_root: 0,
+            capacity: blocks,
+            entries: table,
+        }
+    }
+
+    /// The first of the two neighbouring places `object_id` may take.
+    fn slot(&self, object_id: u64) -> usize {
+        let mixed = object_id.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        ((mixed ^ (mixed >> 32)) as usize) & (self.entries.len() - 1) & !1
+    }
+
+    fn get(&self, generation: u64, map_root: u64, object_id: u64) -> Option<u64> {
+        if self.generation != generation || self.map_root != map_root || self.entries.is_empty() {
+            return None;
+        }
+        let slot = self.slot(object_id);
+        self.entries[slot..slot + 2]
+            .iter()
+            .find(|(id, _)| *id == object_id)
+            .map(|(_, lba)| *lba)
+    }
+
+    fn put(&mut self, generation: u64, map_root: u64, object_id: u64, lba: u64) {
+        if self.entries.is_empty() {
+            return;
+        }
+        if self.generation != generation || self.map_root != map_root {
+            self.entries.fill((0, 0));
+            self.generation = generation;
+            self.map_root = map_root;
+        }
+        // The newer of two objects that meet stays first, the older second.
+        let slot = self.slot(object_id);
+        if self.entries[slot].0 != object_id {
+            self.entries[slot + 1] = self.entries[slot];
+        }
+        self.entries[slot] = (object_id, lba);
+    }
 }
 
 struct ApiTraceGuard<'a, D: BlockDevice> {
@@ -582,6 +704,8 @@ impl<D: BlockDevice> Volume<D> {
             snapshot_limits: None,
             snapshot_handles: BTreeMap::new(),
             snapshot_mount: Arc::new(()),
+            object_memo: ObjectMemo::for_capacity(0),
+            no_orphans: None,
         }
     }
 
@@ -1140,8 +1264,7 @@ impl<D: BlockDevice> Volume<D> {
         // Changes waiting in the open window are part of the namespace every
         // caller sees.
         if let Some(window) = self.window.take() {
-            let result = self
-                .comparison_key(name.as_bytes())
+            let result = name_key::comparison_key_buf(&self.ident, name.as_bytes())
                 .and_then(|key| self.batch_lookup(&window.pending, directory_id, &key));
             self.window = Some(window);
             return result.map(|entry| entry.map(|entry| (entry.child_id, entry.name)));
@@ -1150,15 +1273,15 @@ impl<D: BlockDevice> Volume<D> {
         if directory_record.object_type != ObjectType::Directory {
             return Err(CoreError::NotDirectory);
         }
-        let key = self.comparison_key(name.as_bytes())?;
+        let key = name_key::comparison_key_buf(&self.ident, name.as_bytes())?;
         let root = directory_record.data_root;
-        let entry = self.flight_view_scope(
+        self.flight_view_scope(
             crate::flight::ReadPath::Lookup,
             0,
             directory_id,
             root,
             |volume| {
-                directory::lookup_entry(
+                directory::lookup_entry_with(
                     &mut volume.dev,
                     &volume.ident.geometry(),
                     root,
@@ -1166,10 +1289,10 @@ impl<D: BlockDevice> Volume<D> {
                     volume.checkpoint.generation,
                     &volume.ident,
                     &key,
+                    |entry| (entry.child_id, entry.name.to_vec()),
                 )
             },
-        )?;
-        Ok(entry.map(|entry| (entry.child_id, entry.name)))
+        )
     }
 
     /// Lists the root directory as (original name, object ID) pairs.
@@ -1646,7 +1769,7 @@ impl<D: BlockDevice> Volume<D> {
         let count = (record.size_bytes - offset).min(destination.len() as u64);
         let end = offset + count;
         let block_size = self.dev.block_size() as u64;
-        let mut block = vec![0u8; block_size as usize];
+        let mut block = crate::scratch::Block::take(block_size as usize);
         let pending_layout = self.window.as_ref().and_then(|window| {
             window
                 .pending
@@ -1664,46 +1787,108 @@ impl<D: BlockDevice> Volume<D> {
         } else {
             None
         };
-        for logical_block in offset / block_size..end.div_ceil(block_size) {
-            block.fill(0);
-            let mapped = if let Some(extents) = pending_layout.as_deref() {
-                extent_at(extents, logical_block)
-                    .filter(|extent| extent.flags & EXTENT_UNWRITTEN == 0)
-                    .map(|extent| extent.physical_start + logical_block - extent.logical_start)
+        // The file is walked a mapping at a time, not a block at a time: a
+        // run of blocks that lie together on the device is one request for
+        // as much of it as the caller wants.
+        let end_block = end.div_ceil(block_size);
+        let mut logical_block = offset / block_size;
+        while logical_block < end_block {
+            // Where this block lies, or nowhere, and for how many blocks
+            // from here the same answer holds.
+            let covering = |extent: Option<Extent>| -> Result<(Option<u64>, u64), CoreError> {
+                Ok(match extent {
+                    Some(extent) => (
+                        (extent.flags & EXTENT_UNWRITTEN == 0).then_some(
+                            extent.physical_start + logical_block - extent.logical_start,
+                        ),
+                        extent.logical_end()? - logical_block,
+                    ),
+                    None => (None, 1),
+                })
+            };
+            let (mapped, same) = if let Some(extents) = pending_layout.as_deref() {
+                covering(extent_at(extents, logical_block))?
             } else if let Some((start, blocks)) = created_run {
-                (logical_block < blocks).then_some(start + logical_block)
+                if logical_block < blocks {
+                    (Some(start + logical_block), blocks - logical_block)
+                } else {
+                    (None, end_block - logical_block)
+                }
             } else {
                 let record = committed_record
                     .as_ref()
                     .expect("committed record loaded without a pending layout");
                 if record.flags & OBJECT_FLAG_EXTENT_TREE != 0 {
-                    extent_map::lookup_extent(
+                    covering(extent_map::lookup_extent(
                         &mut self.dev,
                         &self.ident.geometry(),
                         record.data_root,
                         object_id,
                         self.checkpoint.generation,
                         logical_block,
-                    )?
-                    .filter(|extent| extent.flags & EXTENT_UNWRITTEN == 0)
-                    .map(|extent| extent.physical_start + logical_block - extent.logical_start)
+                    )?)?
                 } else if logical_block < record.data_blocks {
-                    Some(record.data_root.checked_add(logical_block).ok_or_else(|| {
-                        CoreError::Corrupt(format!("object {object_id} extent overflow"))
-                    })?)
+                    (
+                        Some(record.data_root.checked_add(logical_block).ok_or_else(|| {
+                            CoreError::Corrupt(format!("object {object_id} extent overflow"))
+                        })?),
+                        record.data_blocks - logical_block,
+                    )
                 } else {
-                    None
+                    (None, end_block - logical_block)
                 }
             };
-            if let Some(lba) = mapped {
-                self.dev.read_block(lba, &mut block)?;
-            }
-            let block_start = logical_block * block_size;
-            let copy_start = offset.max(block_start);
-            let copy_end = end.min(block_start.saturating_add(block_size));
-            let source = (copy_start - block_start) as usize..(copy_end - block_start) as usize;
+            let run = same.clamp(1, end_block - logical_block);
+            let run_start = logical_block * block_size;
+            let copy_start = offset.max(run_start);
+            let copy_end = end.min(run_start.saturating_add(run * block_size));
             let target = (copy_start - offset) as usize..(copy_end - offset) as usize;
-            destination[target].copy_from_slice(&block[source]);
+            match mapped {
+                // Whole blocks go where the caller wants them, not through
+                // a buffer of ours first.
+                Some(lba)
+                    if copy_start == run_start
+                        && (copy_end - run_start).is_multiple_of(block_size) =>
+                {
+                    self.dev.read_blocks(lba, &mut destination[target])?;
+                }
+                // A short run with a ragged end is read whole, once, and
+                // the bytes wanted are copied out of it.
+                Some(lba) if run <= RAGGED_RUN_BLOCKS => {
+                    let mut blocks = crate::scratch::Block::take((run * block_size) as usize);
+                    self.dev.read_blocks(lba, &mut blocks)?;
+                    let source = (copy_start - run_start) as usize..(copy_end - run_start) as usize;
+                    destination[target].copy_from_slice(&blocks[source]);
+                }
+                // A long one: the ragged first and last blocks through a
+                // block of ours, everything between them directly.
+                Some(lba) => {
+                    let mut at = copy_start;
+                    while at < copy_end {
+                        let within = at - run_start;
+                        let device = lba + within / block_size;
+                        let into = (at - offset) as usize;
+                        let whole = (copy_end - at) / block_size * block_size;
+                        if within.is_multiple_of(block_size) && whole != 0 {
+                            self.dev.read_blocks(
+                                device,
+                                &mut destination[into..into + whole as usize],
+                            )?;
+                            at += whole;
+                        } else {
+                            let from = within % block_size;
+                            let take = (block_size - from).min(copy_end - at);
+                            self.dev.read_blocks(device, &mut block)?;
+                            destination[into..into + take as usize]
+                                .copy_from_slice(&block[from as usize..(from + take) as usize]);
+                            at += take;
+                        }
+                    }
+                }
+                // A hole, or an extent nothing was written to, reads as zeros.
+                None => destination[target].fill(0),
+            }
+            logical_block += run;
         }
         Ok(count as usize)
     }
@@ -3741,10 +3926,65 @@ impl<D: BlockDevice> Volume<D> {
         if !self.orphan_directory_enabled() {
             return Ok(false);
         }
+        // No file waits for cleanup on most volumes most of the time. An
+        // empty orphan directory stays empty for as long as the committed
+        // tree it was read from is the committed tree, so the answer is
+        // remembered with that tree's name. A debug build asks the
+        // directory as well and requires the same answer.
+        let committed = (self.checkpoint.generation, self.checkpoint.object_map_block);
+        if let Some((generation, map_root, record_lba)) = self.no_orphans {
+            if (generation, map_root) == committed
+                && !cfg!(feature = "verify-cached-metadata")
+                && self.dev.decoded_capacity() != 0
+            {
+                if cfg!(debug_assertions) {
+                    assert!(
+                        !self.orphan_object_descended(object_id)?,
+                        "object {object_id}: orphan directory remembered empty, it names it"
+                    );
+                    return Ok(false);
+                }
+                self.observe_object_mapping(
+                    OBJECT_ORPHAN_DIRECTORY,
+                    crate::flight::EventKind::ObjectLookup,
+                    0,
+                );
+                self.observe_object_mapping(
+                    OBJECT_ORPHAN_DIRECTORY,
+                    crate::flight::EventKind::ObjectMapped,
+                    record_lba,
+                );
+                return Ok(false);
+            }
+        }
+        self.orphan_object_descended(object_id)
+    }
+
+    /// [`Self::orphan_object`] from the committed orphan directory itself.
+    fn orphan_object_descended(&mut self, object_id: u64) -> Result<bool, CoreError> {
         let Some(orphan_directory) = self.read_object(OBJECT_ORPHAN_DIRECTORY)? else {
             return Ok(false);
         };
         self.validate_orphan_directory(orphan_directory)?;
+        // The root of an empty directory says so by itself: the name and
+        // its comparison key are built only when there is something to
+        // look for.
+        if directory::is_empty(
+            &mut self.dev,
+            &self.ident.geometry(),
+            orphan_directory.data_root,
+            OBJECT_ORPHAN_DIRECTORY,
+            self.checkpoint.generation,
+        )? {
+            let committed = (self.checkpoint.generation, self.checkpoint.object_map_block);
+            if let Some(record_lba) =
+                self.object_memo
+                    .get(committed.0, committed.1, OBJECT_ORPHAN_DIRECTORY)
+            {
+                self.no_orphans = Some((committed.0, committed.1, record_lba));
+            }
+            return Ok(false);
+        }
         let name = Self::orphan_name(object_id);
         let key = self.comparison_key(name.as_bytes())?;
         let entry = directory::lookup_entry(
@@ -5119,7 +5359,7 @@ impl<D: BlockDevice> Volume<D> {
             .physical_start
             .checked_add(logical_block - extent.logical_start)
             .ok_or_else(|| CoreError::Corrupt("mapped physical block overflows".into()))?;
-        self.dev.read_block(lba, block)?;
+        self.dev.read_blocks(lba, block)?;
         Ok(())
     }
 
@@ -5795,7 +6035,7 @@ impl<D: BlockDevice> Volume<D> {
             if index < blocks {
                 // The file's last block keeps the bytes it already holds.
                 self.dev
-                    .read_block(start + index, &mut block)
+                    .read_blocks(start + index, &mut block)
                     .map_err(|error| (mutated, error.into()))?;
                 block[(size - at) as usize..].fill(0);
             }
@@ -5808,7 +6048,7 @@ impl<D: BlockDevice> Volume<D> {
                     .copy_from_slice(&content[source..source + (to - from) as usize]);
             }
             mutated = true;
-            if let Err(error) = self.dev.write_block(start + index, &block) {
+            if let Err(error) = self.dev.write_blocks(start + index, &block) {
                 self.flight_data_event(
                     crate::flight::EventKind::DataWriteFailed,
                     crate::flight::DataContext {
@@ -5887,7 +6127,7 @@ impl<D: BlockDevice> Volume<D> {
                 break;
             }
             self.dev
-                .read_block(old_start + index, &mut block)
+                .read_blocks(old_start + index, &mut block)
                 .map_err(|error| (false, error.into()))?;
             let end = bytes.len().min(at + block_size as usize);
             bytes[at..end].copy_from_slice(&block[..end - at]);
@@ -5916,7 +6156,7 @@ impl<D: BlockDevice> Volume<D> {
             block.fill(0);
             block[..end - at].copy_from_slice(&bytes[at..end]);
             self.dev
-                .write_block(new_start + index, &block)
+                .write_blocks(new_start + index, &block)
                 .map_err(|error| (true, error.into()))?;
         }
         window.pending.prewritten_data_blocks = window
@@ -6405,7 +6645,7 @@ impl<D: BlockDevice> Volume<D> {
                             let from = i * block_size;
                             let to = content.len().min(from + block_size);
                             block[..to - from].copy_from_slice(&content[from..to]);
-                            if let Err(error) = self.dev.write_block(start + i as u64, &block) {
+                            if let Err(error) = self.dev.write_blocks(start + i as u64, &block) {
                                 self.flight_data_event(
                                     crate::flight::EventKind::DataWriteFailed,
                                     crate::flight::DataContext {
@@ -7344,7 +7584,25 @@ impl<D: BlockDevice> Volume<D> {
             );
             let mut block_iter = blocks.iter();
             let mut logical_block = first_block;
+            // Unobserved, the blocks of an extent are one transfer: the
+            // same blocks in the same order. A recorder is told which block
+            // a failed write was for, and one transfer cannot say, so an
+            // observed volume writes them one at a time.
+            let mut run = Vec::new();
             for extent in &additions {
+                if self.flight.is_none() && extent.block_count > 1 {
+                    run.clear();
+                    for _ in 0..extent.block_count {
+                        let block = block_iter.next().ok_or_else(|| {
+                            CoreError::Corrupt("logged write block count mismatch".into())
+                        })?;
+                        run.extend_from_slice(block);
+                    }
+                    mutated = true;
+                    self.dev.write_blocks(extent.physical_start, &run)?;
+                    logical_block += extent.block_count;
+                    continue;
+                }
                 for physical_offset in 0..extent.block_count {
                     let block = block_iter.next().ok_or_else(|| {
                         CoreError::Corrupt("logged write block count mismatch".into())
@@ -7352,7 +7610,7 @@ impl<D: BlockDevice> Volume<D> {
                     mutated = true;
                     if let Err(error) = self
                         .dev
-                        .write_block(extent.physical_start + physical_offset, block)
+                        .write_blocks(extent.physical_start + physical_offset, block)
                     {
                         self.flight_data_event(
                             crate::flight::EventKind::DataWriteFailed,
@@ -7560,7 +7818,7 @@ impl<D: BlockDevice> Volume<D> {
                         window.generation,
                     );
                     mutated = true;
-                    if let Err(error) = self.dev.write_block(physical_start, &block) {
+                    if let Err(error) = self.dev.write_blocks(physical_start, &block) {
                         self.flight_data_event(
                             crate::flight::EventKind::DataWriteFailed,
                             zeroed,
@@ -8630,6 +8888,77 @@ impl<D: BlockDevice> Volume<D> {
             );
             return Ok(Some(self.state.root_object));
         }
+        let (generation, map_root) = (self.checkpoint.generation, self.checkpoint.object_map_block);
+        if !cfg!(feature = "verify-cached-metadata") {
+            let remembered = self.object_memo.get(generation, map_root, object_id);
+            if remembered == Some(OBJECT_MEMO_ABSENT) {
+                // The map has no such object, and said so under this root.
+                if cfg!(debug_assertions) {
+                    let descended = self.read_object_checked(object_id)?;
+                    assert!(
+                        descended.is_none(),
+                        "object {object_id}: remembered absent, the map holds it"
+                    );
+                    return Ok(None);
+                }
+                self.observe_object_mapping(object_id, crate::flight::EventKind::ObjectLookup, 0);
+                self.observe_object_mapping(object_id, crate::flight::EventKind::ObjectMissing, 0);
+                return Ok(None);
+            }
+            if let Some(lba) = remembered {
+                // The record as the device keeps it beside the block. When
+                // the block left the cache, the whole path below reads it.
+                let kept = self
+                    .dev
+                    .decoded(lba)
+                    .and_then(|value| value.downcast::<KeptRecord>().ok());
+                if let Some(kept) = kept {
+                    if cfg!(debug_assertions) {
+                        let (record, descended) = self
+                            .read_object_checked(object_id)?
+                            .expect("a remembered object is in the committed map");
+                        assert_eq!(
+                            (descended, record),
+                            (lba, kept.record),
+                            "object {object_id}: the remembered record differs from the map's"
+                        );
+                        return Ok(Some(record));
+                    }
+                    self.observe_object_mapping(
+                        object_id,
+                        crate::flight::EventKind::ObjectLookup,
+                        0,
+                    );
+                    self.observe_object_mapping(
+                        object_id,
+                        crate::flight::EventKind::ObjectMapped,
+                        lba,
+                    );
+                    return Ok(Some(kept.record));
+                }
+            }
+        }
+        let found = self.read_object_checked(object_id)?;
+        // The table follows the size of the cache whose blocks it names.
+        let capacity = self.dev.decoded_capacity();
+        if self.object_memo.capacity != capacity {
+            self.object_memo = ObjectMemo::for_capacity(capacity);
+        }
+        self.object_memo.put(
+            generation,
+            map_root,
+            object_id,
+            found.map_or(OBJECT_MEMO_ABSENT, |(_, lba)| lba),
+        );
+        Ok(found.map(|(record, _)| record))
+    }
+
+    /// The record of `object_id` and its block, found through the committed
+    /// object map and checked in full.
+    fn read_object_checked(
+        &mut self,
+        object_id: u64,
+    ) -> Result<Option<(ObjectRecord, u64)>, CoreError> {
         let Some(lba) = self.lookup_object_lba(object_id)? else {
             return Ok(None);
         };
@@ -8638,10 +8967,8 @@ impl<D: BlockDevice> Volume<D> {
                 "object {object_id} record block {lba} outside allocatable bounds"
             )));
         }
-        let mut buf = vec![0u8; self.dev.block_size()];
-        self.dev.read_block(lba, &mut buf)?;
-        let (record, block_generation) = decode_record(&mut self.dev, lba, &buf)
-            .map_err(|e| CoreError::Corrupt(format!("object {object_id} record invalid: {e}")))?;
+        let kept = load_record(&mut self.dev, lba, object_id)?;
+        let (record, block_generation) = (kept.record, kept.generation);
         if block_generation == 0 || block_generation > self.checkpoint.generation {
             return Err(CoreError::Corrupt(format!(
                 "object {object_id} record block {lba} generation {block_generation} outside committed range"
@@ -8687,7 +9014,7 @@ impl<D: BlockDevice> Volume<D> {
                 }
             }
         }
-        Ok(Some(record))
+        Ok(Some((record, lba)))
     }
 
     fn observe_object_mapping(
@@ -9103,30 +9430,45 @@ struct KeptRecord {
     generation: u64,
 }
 
-/// Decodes the object record in `buf`, the bytes just read from block `lba`.
-/// A record decoded here was checked when it was decoded; when the device
-/// kept it, it is used as it is, and with the `verify-cached-metadata`
-/// feature the bytes are checked again first.
-fn decode_record<D: BlockDevice>(
+/// The object record in block `lba`, decoded. The device is asked for the
+/// decoded form it keeps before it is asked for bytes: a kept record was
+/// checked when it was decoded and any write of its block drops it. With
+/// the `verify-cached-metadata` feature the bytes are read and checked on
+/// every use.
+fn load_record<D: BlockDevice>(
     dev: &mut D,
     lba: u64,
-    buf: &[u8],
-) -> Result<(ObjectRecord, u64), afsplus_format::FormatError> {
+    object_id: u64,
+) -> Result<Arc<KeptRecord>, CoreError> {
+    if !cfg!(feature = "verify-cached-metadata") {
+        if let Some(kept) = dev
+            .decoded(lba)
+            .and_then(|value| value.downcast::<KeptRecord>().ok())
+        {
+            return Ok(kept);
+        }
+    }
+    let mut buf = crate::scratch::Block::take(dev.block_size());
+    dev.read_block(lba, &mut buf)?;
+    let invalid = |error| CoreError::Corrupt(format!("object {object_id} record invalid: {error}"));
     if let Some(kept) = dev
         .attached(lba)
         .and_then(|value| value.downcast::<KeptRecord>().ok())
     {
         if cfg!(feature = "verify-cached-metadata") {
             afsplus_format::header::BlockHeader::verify(
-                buf,
+                &buf,
                 afsplus_format::header::block_type::OBJECT,
-            )?;
+            )
+            .map_err(invalid)?;
         }
-        return Ok((kept.record, kept.generation));
+        return Ok(kept);
     }
-    let (record, generation) = ObjectRecord::decode_metadata_with_generation(buf)?;
-    dev.attach(lba, std::sync::Arc::new(KeptRecord { record, generation }));
-    Ok((record, generation))
+    let (record, generation) =
+        ObjectRecord::decode_metadata_with_generation(&buf).map_err(invalid)?;
+    let kept = Arc::new(KeptRecord { record, generation });
+    dev.attach(lba, Arc::clone(&kept) as afsplus_block::Decoded);
+    Ok(kept)
 }
 
 fn direct_layout(extents: &[Extent], size_bytes: u64, block_size: u64) -> Option<Option<Extent>> {

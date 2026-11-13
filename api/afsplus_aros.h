@@ -163,7 +163,11 @@ struct AfsplusArosDevice {
     uint32_t struct_size;
     void *context;
     uint32_t block_size;
-    uint32_t reserved;
+    /* Most blocks one call of read_block or write_block may carry; zero
+     * means one, which is all a device was asked for before this field had
+     * a meaning. `length` of a call is a whole number of blocks up to it,
+     * and the blocks are `lba`, `lba + 1` and so on. */
+    uint32_t max_transfer_blocks;
     uint64_t total_blocks;
     AfsplusArosReadBlock read_block;
     AfsplusArosWriteBlock write_block;
@@ -307,7 +311,10 @@ struct AfsplusArosTraceCounters {
  * library's, shared by the instances one copy of it serves, and leave out the
  * handler's own allocations and allocator overhead. cache_blocks is the
  * read cache in force (group CACHE), cache_hits and cache_misses the reads it
- * served and the reads that went to the device, since the mount. */
+ * served and the reads that went to the device, since the mount.
+ * cache_decoded_hits counts the uses of a cached block through the decoded
+ * form kept beside it, which read no bytes; a caller of an older layout
+ * does not receive it. */
 struct AfsplusArosCounters {
     uint32_t struct_size;
     uint32_t reserved;
@@ -324,6 +331,7 @@ struct AfsplusArosCounters {
     uint64_t cache_blocks;
     uint64_t cache_hits;
     uint64_t cache_misses;
+    uint64_t cache_decoded_hits;
 };
 
 /* Sized query structure; see AfsplusArosInterface for the growth rule. */
@@ -375,7 +383,7 @@ _Static_assert(sizeof(struct AfsplusArosExtent) == 24,
     "AfsplusArosExtent ABI drift");
 _Static_assert(sizeof(struct AfsplusArosDirEntry) == 24,
     "AfsplusArosDirEntry ABI drift");
-_Static_assert(sizeof(struct AfsplusArosCounters) == 112,
+_Static_assert(sizeof(struct AfsplusArosCounters) == 120,
     "AfsplusArosCounters ABI drift");
 _Static_assert(sizeof(struct AfsplusArosHealth) == 136,
     "AfsplusArosHealth ABI drift");
@@ -647,7 +655,11 @@ int32_t afsplus_aros_file_comment(struct AfsplusAros *filesystem,
  * keeps. set_cache_blocks asks for blocks (zero: none), bounded by the volume
  * size and 1 << 20, and stores the bounded size in output_blocks; the cache
  * takes the memory at its next device access and keeps its size when the
- * memory cannot be had. A mount starts without one. */
+ * memory cannot be had. A mount starts without one. Half of the blocks hold
+ * file data and the rest metadata, each least recently used first to leave,
+ * so that reading files does not evict the trees and records. A read of file
+ * data that continues the one before it asks the device for up to 64 KiB
+ * more than was asked, into the file-data half. */
 int32_t afsplus_aros_set_cache_blocks(struct AfsplusAros *filesystem,
     uint32_t blocks, uint32_t *output_blocks);
 

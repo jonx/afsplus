@@ -214,7 +214,7 @@ fn a_failing_device_becomes_a_queryable_health_event() {
         struct_size: size_of::<AfsplusArosDevice>() as u32,
         context: ptr::from_mut(&mut faulty).cast::<c_void>(),
         block_size: 4096,
-        reserved: 0,
+        max_transfer_blocks: 0,
         total_blocks: 8192,
         read_block: Some(faulty_read),
         write_block: Some(faulty_write),

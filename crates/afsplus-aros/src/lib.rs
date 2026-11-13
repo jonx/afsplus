@@ -8,6 +8,7 @@
 pub mod health;
 pub mod management;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use afsplus_block::BlockDevice;
@@ -484,9 +485,8 @@ impl<D: BlockDevice> ArosAdapter<D> {
             if self.vfs.stat(object_id)?.kind == NodeKind::Symlink {
                 return Err(ArosError::IsSoftLink);
             }
-            let stored_name = self.encode_name(stored.as_bytes())?;
-            self.known_parents
-                .insert(object_id, (Some(base_object), stored_name.clone()));
+            let stored_name = self.encode_stored_name(stored)?;
+            self.remember_parent(object_id, base_object, &stored_name);
             (object_id, Some(base_object), stored_name)
         };
         self.insert_lock(object_id, parent, stored_name, access)
@@ -547,9 +547,8 @@ impl<D: BlockDevice> ArosAdapter<D> {
             if self.vfs.stat(child)?.kind == NodeKind::Symlink {
                 return Err(ArosError::IsSoftLink);
             }
-            let stored_name = self.encode_name(stored.as_bytes())?;
-            self.known_parents
-                .insert(child, (Some(object), stored_name.clone()));
+            let stored_name = self.encode_stored_name(stored)?;
+            self.remember_parent(child, object, &stored_name);
             (object, parent, name) = (child, Some(object), stored_name);
         }
         self.insert_lock(object, parent, name, access)
@@ -1942,8 +1941,7 @@ impl<D: BlockDevice> ArosAdapter<D> {
         state.next_cookie = page.next_cookie;
         let stat = self.vfs.stat(entry.object_id)?;
         let name = self.encode_name(&entry.name)?;
-        self.known_parents
-            .insert(entry.object_id, (Some(object_id), name.clone()));
+        self.remember_parent(entry.object_id, object_id, &name);
         self.file_info(stat, name, page.next_cookie)
     }
 
@@ -2084,7 +2082,9 @@ impl<D: BlockDevice> ArosAdapter<D> {
         })
     }
 
-    fn decode_component(&self, bytes: &[u8]) -> Result<String, ArosError> {
+    /// A path component as the volume's UTF-8. A UTF-8 mount's component
+    /// is used where it lies; only Latin-1 needs a string of its own.
+    fn decode_component<'a>(&self, bytes: &'a [u8]) -> Result<Cow<'a, str>, ArosError> {
         // Bounded before the scan and the Latin-1 allocation: a length is a
         // caller's claim, and no stored name is longer in any encoding.
         if bytes.len() > NAME_MAX_UTF8_BYTES {
@@ -2095,9 +2095,35 @@ impl<D: BlockDevice> ArosAdapter<D> {
         }
         match self.config.name_encoding {
             NameEncoding::Utf8 => std::str::from_utf8(bytes)
-                .map(str::to_owned)
+                .map(Cow::Borrowed)
                 .map_err(|_| ArosError::InvalidComponentName),
-            NameEncoding::Latin1 => Ok(bytes.iter().map(|byte| char::from(*byte)).collect()),
+            NameEncoding::Latin1 => Ok(Cow::Owned(
+                bytes.iter().map(|byte| char::from(*byte)).collect(),
+            )),
+        }
+    }
+
+    /// [`Self::encode_name`] of a stored name the caller owns: on a UTF-8
+    /// mount the name is its own encoding, and its buffer is kept.
+    fn encode_stored_name(&self, stored: String) -> Result<Vec<u8>, ArosError> {
+        match self.config.name_encoding {
+            NameEncoding::Utf8 if stored.len() <= self.config.max_file_info_name_bytes => {
+                Ok(stored.into_bytes())
+            }
+            _ => self.encode_name(stored.as_bytes()),
+        }
+    }
+
+    /// Records where `child` hangs, for a later parent operation. A walk
+    /// that passes the same way again finds the entry it left and writes
+    /// nothing.
+    fn remember_parent(&mut self, child: ObjectId, parent: ObjectId, name: &[u8]) {
+        match self.known_parents.get(&child) {
+            Some((Some(known), known_name)) if *known == parent && known_name == name => {}
+            _ => {
+                self.known_parents
+                    .insert(child, (Some(parent), name.to_vec()));
+            }
         }
     }
 

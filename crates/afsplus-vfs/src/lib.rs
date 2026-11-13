@@ -1385,16 +1385,33 @@ impl<D: BlockDevice> Vfs<D> {
         };
         let visible_entries = loop {
             if let Some(last) = page.entries.last() {
-                self.directory_resume.insert(handle, last.name.clone());
+                // The resume point keeps its buffer from one page to the
+                // next: a walk of one entry a call replaced it every time.
+                match self.directory_resume.get_mut(&handle) {
+                    Some(resume) => {
+                        resume.clear();
+                        resume.extend_from_slice(&last.name);
+                    }
+                    None => {
+                        self.directory_resume.insert(handle, last.name.clone());
+                    }
+                }
             }
-            let mut visible = Vec::new();
-            for entry in std::mem::take(&mut page.entries) {
-                match self.restore_stage_private(entry.child_id) {
-                    Ok(false) => visible.push(entry),
+            // The entries that may be shown are kept where they are, in
+            // their order; the page's vector becomes the result.
+            let mut visible = std::mem::take(&mut page.entries);
+            let mut kept = 0;
+            for index in 0..visible.len() {
+                let child_id = visible[index].child_id;
+                match self.restore_stage_private(child_id) {
+                    Ok(false) => {
+                        visible.swap(kept, index);
+                        kept += 1;
+                    }
                     Ok(true) => {}
                     Err(VfsError::Corrupt(_)) => {
                         if self.hidden_corrupt.len() < HEALTH_NOTES_MAX
-                            && self.hidden_corrupt.insert(entry.child_id)
+                            && self.hidden_corrupt.insert(child_id)
                         {
                             self.push_note(HealthNote::HiddenCorruptEntry);
                         }
@@ -1402,6 +1419,7 @@ impl<D: BlockDevice> Vfs<D> {
                     Err(error) => return Err(error),
                 }
             }
+            visible.truncate(kept);
             if !visible.is_empty() || page.eof {
                 break visible;
             }

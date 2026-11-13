@@ -117,6 +117,57 @@ int main(void)
     assert(transfer_count == 3);
     transfer_result = 0;
 
+    /* A mount that names no transfer bound moves one block a request, and
+     * says so to the library. */
+    assert(device.max_transfer_blocks == 1);
+    {
+        static uint8_t run[4 * 4096];
+        uint32_t before = transfer_count;
+
+        assert(device.read_block(device.context, 0, run, 2 * 4096)
+            == ERROR_BAD_NUMBER);
+        assert(transfer_count == before);
+
+        /* With a bound, a run of whole blocks is one transfer of all of
+         * it, at the byte offset of its first block. */
+        config.partition_length_bytes = 8 * 4096;
+        config.max_transfer_blocks = 3;
+        assert(afsplus_aros_trackdisk_init(&config, &trackdisk, &device)
+            == 0);
+        assert(device.max_transfer_blocks == 3 && device.total_blocks == 8);
+        before = transfer_count;
+        memset(run, 0, sizeof(run));
+        assert(device.read_block(device.context, 2, run, 3 * 4096) == 0);
+        assert(transfer_count == before + 1);
+        assert(last_command == 2 && last_offset == 512 + 2 * 4096
+            && last_length == 3 * 4096 && !last_writing);
+        assert(run[0] == 0x5a && run[3 * 4096 - 1] == 0x5a
+            && run[3 * 4096] == 0);
+        assert(device.write_block(device.context, 5, run, 3 * 4096) == 0);
+        assert(transfer_count == before + 2);
+        assert(last_command == 3 && last_offset == 512 + 5 * 4096
+            && last_length == 3 * 4096 && last_writing);
+        /* Refused before the device: longer than the bound, not whole
+         * blocks, empty, or past the end of the partition. */
+        before = transfer_count;
+        assert(device.read_block(device.context, 0, run, 4 * 4096)
+            == ERROR_BAD_NUMBER);
+        assert(device.read_block(device.context, 0, run, 4096 + 512)
+            == ERROR_BAD_NUMBER);
+        assert(device.read_block(device.context, 0, run, 0)
+            == ERROR_BAD_NUMBER);
+        assert(device.read_block(device.context, 6, run, 3 * 4096)
+            == ERROR_OBJECT_TOO_LARGE);
+        assert(device.write_block(device.context, 6, run, 3 * 4096)
+            == ERROR_OBJECT_TOO_LARGE);
+        assert(device.read_block(device.context, 6, run, 2 * 4096) == 0);
+        assert(transfer_count == before + 1);
+        config.partition_length_bytes = 8192;
+        config.max_transfer_blocks = 0;
+        assert(afsplus_aros_trackdisk_init(&config, &trackdisk, &device)
+            == 0);
+    }
+
     config.logical_block_size = 2048;
     assert(afsplus_aros_trackdisk_init(&config, &trackdisk, &device)
         == ERROR_BAD_NUMBER);

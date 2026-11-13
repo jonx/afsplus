@@ -86,12 +86,56 @@ pub trait BlockDevice {
     /// Durability barrier: all previously written blocks are durable on return.
     fn flush(&mut self) -> Result<(), BlockError>;
 
+    /// Reads the run of whole blocks that starts at `lba` into `buf`, whose
+    /// length is a multiple of the block size. This is the path of file
+    /// data: a device that can transfers the run in one request, and a
+    /// cache keeps what it reads apart from the metadata that
+    /// [`BlockDevice::read_block`] reads. The bytes are those of the same
+    /// blocks read one at a time, which is what this default does.
+    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        let block_size = self.block_size();
+        check_run(buf.len(), block_size)?;
+        for (index, block) in buf.chunks_exact_mut(block_size).enumerate() {
+            self.read_block(lba + index as u64, block)?;
+        }
+        Ok(())
+    }
+
+    /// Writes `data`, a whole number of blocks, to the run that starts at
+    /// `lba`: the same blocks in the same order as one
+    /// [`BlockDevice::write_block`] each, which is what this default does.
+    /// A device that transfers the run in one request may, like any write
+    /// before the next barrier, have applied any part of it when it fails
+    /// or the power is cut.
+    fn write_blocks(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        let block_size = self.block_size();
+        check_run(data.len(), block_size)?;
+        for (index, block) in data.chunks_exact(block_size).enumerate() {
+            self.write_block(lba + index as u64, block)?;
+        }
+        Ok(())
+    }
+
     /// A decoded form of block `lba` that a caller attached with
     /// [`BlockDevice::attach`] and that no write of the block has dropped
     /// since. A device that keeps none answers `None`, and that is always
     /// correct: the caller decodes the bytes itself.
     fn attached(&self, _lba: u64) -> Option<Decoded> {
         None
+    }
+
+    /// [`BlockDevice::attached`] for a caller about to use the decoded form
+    /// in place of the block's bytes: a device that orders its cache by use
+    /// counts this as a use of the block, exactly as a read of it would be.
+    fn decoded(&mut self, lba: u64) -> Option<Decoded> {
+        self.attached(lba)
+    }
+
+    /// How many blocks the device may keep a decoded form for; zero when it
+    /// keeps none. A caller sizes what it remembers about kept blocks by
+    /// it, so that memory follows the one cache setting.
+    fn decoded_capacity(&self) -> usize {
+        0
     }
 
     /// Keeps `value`, decoded from the bytes block `lba` holds now, until the
@@ -103,6 +147,17 @@ pub trait BlockDevice {
 /// A decoded block a device may keep beside its bytes; the caller knows the
 /// type and downcasts.
 pub type Decoded = std::sync::Arc<dyn std::any::Any + Send + Sync>;
+
+/// Refuses a run that is not a whole number of blocks.
+pub fn check_run(length: usize, block_size: usize) -> Result<(), BlockError> {
+    if block_size == 0 || !length.is_multiple_of(block_size) {
+        return Err(BlockError::WrongBufferSize {
+            expected: block_size,
+            actual: length,
+        });
+    }
+    Ok(())
+}
 
 pub(crate) fn check_access(
     lba: u64,

@@ -3,6 +3,20 @@
 > **ADRs:** none · **Spec:** none ·
 > **Tests:** none · **Milestones:** none
 
+<!-- toc -->
+
+- [1. Performance principles](#1-performance-principles)
+- [2. Metadata locality](#2-metadata-locality)
+- [3. Small files](#3-small-files)
+- [4. Bulk enumeration](#4-bulk-enumeration)
+- [5. Incremental indexing](#5-incremental-indexing)
+- [6. Write amplification](#6-write-amplification)
+- [7. Cache independence](#7-cache-independence)
+- [8. Executable Core Scale-1 measurements](#8-executable-core-scale-1-measurements)
+- [Cache integration qualification](#cache-integration-qualification)
+
+<!-- /toc -->
+
 ## 1. Performance principles
 
 Optimize measured workloads, not hypothetical ones.
@@ -111,16 +125,57 @@ at no cache, 16 blocks and an unbounded one and requires the same writes and
 barriers in the same order and the same image from all three; the reads fall
 from 8,731 to 1,736 to 11.
 
-A cached block may also keep its decoded tree node or object record beside
-its bytes; any write of the block, a refused one included, and its eviction
-drop it. Tree lookups and record reads use the kept form as it is: it was
-checked when it was decoded, and checking the bytes again would cover only
-the copy beside it, not the decoded form that is used. The
-`verify-cached-metadata` feature of `afsplus-core` checks the bytes again on
-every reuse, at the cost of a CRC32C per read; it is compiled in or out, so
-the default build carries no test of it. A kept form damaged in memory could
-steer a lookup that a change then follows. Having every change find its
-objects through checked bytes is a further step, not taken.
+The cache has two pools with separate capacities. Blocks read one at a
+time are metadata and live in the first; runs of blocks
+(`BlockDevice::read_blocks`, `write_blocks`) are file data and live in the
+second, so reading files cannot evict the trees and records every operation
+needs. A write through either call updates its own pool and drops the block
+from the other. The AROS boundary gives each pool half of the one cache
+setting. A run is one device request for each stretch the data pool does not
+hold, straight into the caller's buffer and bounded by the device's maximum
+transfer; a run that continues the previous one is read 64 KiB further than
+asked, into the pool. The format carries no checksum of file data
+([06-files-and-extents.md](06-files-and-extents.md)), so a run is checked
+exactly as its blocks were one at a time: not at all.
+
+A cached metadata block may also keep its decoded tree node or object record
+beside its bytes; any write of the block, a refused one included, and its
+eviction drop it. Tree descents and record reads ask for the kept form first
+and read the block's bytes only when there is none: it was checked when it
+was decoded, and checking the bytes again would cover only the copy beside
+it, not the decoded form that is used. The identity and key range of a node
+are still checked on every visit, against the parent it was reached through.
+The `verify-cached-metadata` feature of `afsplus-core` reads and checks the
+bytes on every reuse, at the cost of a copy and a CRC32C per read, and
+turns off the three memories below; it is compiled in or out, so the default
+build carries no test of it. A kept form damaged in memory could steer a
+lookup that a change then follows. Having every change find its objects
+through checked bytes is a further step, not taken.
+
+Three more things are remembered, each built so that it cannot describe
+anything but the bytes it was read from:
+
+| What | Where it lives | Why it cannot be stale | Memory |
+|---|---|---|---|
+| Which entries of a directory leaf were checked in full | with the kept leaf node, in the cache slot | dropped with the node by any write or eviction of the block | one bit an entry |
+| Object ID to record block, or "no such object" | a two-way table in the volume | named by the committed checkpoint generation and object-map root; a committed tree never changes, and under any other pair the table is empty | 16 bytes for each metadata cache block, at most 1 MiB |
+| That the orphan directory is empty | one field in the volume | named by the same pair | 24 bytes |
+
+The record itself is never copied into the table: a hit takes it from the
+cache slot of its block. A debug build makes the full descent on every hit
+of the last two and requires the same answer, so every test that reads an
+object checks them;
+[`cached_reads`](../crates/afsplus-vfs/tests/cached_reads.rs) compares all
+the mount answers with a fresh mount of a copy of its device after every
+kind of change. The hot-path figures are those of
+[`zz_hotpaths`](../crates/afsplus-aros-ffi/tests/zz_hotpaths.rs) and
+[`zz_dataio`](../crates/afsplus-aros-ffi/tests/zz_dataio.rs).
+
+On a mount that delays its commits the AROS handler asks the library what
+is due only after a batch that held a packet which may change the volume,
+while the library reports work pending, and once in 64 batches otherwise
+([`afsplus_commit_tick.h`](../native/aros/afsplus_commit_tick.h)); a batch
+of reads reads no clock and makes no call.
 
 Native VM integration must state which callbacks may allocate or page-fault
 and test reclaim reentrancy under memory pressure. The

@@ -92,7 +92,7 @@ fn counters_match_the_device_and_count_calls_and_failures() {
         struct_size: size_of::<AfsplusArosDevice>() as u32,
         context: ptr::from_mut(&mut counting).cast::<c_void>(),
         block_size: 4096,
-        reserved: 0,
+        max_transfer_blocks: 0,
         total_blocks: 8192,
         read_block: Some(read_block),
         write_block: Some(write_block),
@@ -118,7 +118,7 @@ fn counters_match_the_device_and_count_calls_and_failures() {
 
     // Mount traffic is already counted; no call has completed yet.
     let mounted = counters(filesystem);
-    assert_eq!(mounted.struct_size, 112);
+    assert_eq!(mounted.struct_size, 120);
     assert_eq!((mounted.calls, mounted.failed_calls), (0, 0));
     assert!(mounted.device_reads > 0);
     assert_eq!(mounted.device_reads, counting.seen.reads);
@@ -235,7 +235,13 @@ fn the_read_cache_is_sized_through_the_boundary_and_serves_rereads() {
     assert_eq!(warm.cache_blocks, 256);
     lookup(filesystem);
     let again = counters(filesystem);
-    assert!(again.cache_hits > warm.cache_hits, "a reread is a hit");
+    // The lookup walks tree nodes, which the cache keeps decoded: the
+    // reread uses them where they are and reads no bytes at all.
+    assert!(
+        again.cache_decoded_hits > warm.cache_decoded_hits,
+        "a reread uses the kept node"
+    );
+    assert_eq!(again.cache_hits, warm.cache_hits, "without copying a block");
     assert_eq!(
         again.device_reads, warm.device_reads,
         "and not a device read"

@@ -8,8 +8,12 @@ use afsplus_format::tree::{TreeKind, TreeNode};
 use afsplus_format::{validate_name, OBJECT_INVALID};
 
 use crate::name_key::{validate_entry_key, COMPARISON_KEY_MAX_BYTES};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::Arc;
+
 use crate::tree::{
-    lookup, read_range, visit_tree_nodes, visit_tree_nodes_bounded, TreeSpec, TreeSummary,
+    find_leaf, visit_range, visit_tree_nodes, visit_tree_nodes_bounded, KeptNode, TreeSpec,
+    TreeSummary,
 };
 use crate::CoreError;
 
@@ -50,10 +54,97 @@ pub fn lookup_entry<D: BlockDevice>(
     ident: &Identification,
     key: &[u8],
 ) -> Result<Option<DirEntry>, CoreError> {
-    let (value, _) = lookup(dev, geo, root_lba, spec(owner, max_generation), key)?;
-    value
-        .map(|value| decode_entry(ident, key, &value))
-        .transpose()
+    lookup_entry_with(
+        dev,
+        geo,
+        root_lba,
+        owner,
+        max_generation,
+        ident,
+        key,
+        |entry| DirEntry {
+            key: key.to_vec(),
+            name: entry.name.to_vec(),
+            child_type_hint: entry.child_type_hint,
+            child_id: entry.child_id,
+        },
+    )
+}
+
+/// One entry of a directory leaf, read where the leaf keeps it.
+#[derive(Debug, Clone, Copy)]
+pub struct EntryView<'a> {
+    pub name: &'a [u8],
+    pub child_type_hint: u8,
+    pub child_id: u64,
+}
+
+/// [`lookup_entry`] that hands the entry to `read` where it lies, for a
+/// caller that wants no copy of the key and the name.
+#[allow(clippy::too_many_arguments)]
+pub fn lookup_entry_with<D: BlockDevice, R>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    owner: u64,
+    max_generation: u64,
+    ident: &Identification,
+    key: &[u8],
+    read: impl FnOnce(EntryView<'_>) -> R,
+) -> Result<Option<R>, CoreError> {
+    let (leaf, _) = find_leaf(dev, geo, root_lba, spec(owner, max_generation), key)?;
+    let Ok(index) = leaf
+        .node
+        .items
+        .binary_search_by(|item| item.key.as_slice().cmp(key))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(read(checked_entry(&leaf, ident, index)?)))
+}
+
+/// Which entries of a kept directory leaf have been checked in full. It is
+/// kept with the decoded leaf, so it describes exactly the bytes the leaf
+/// was decoded from and goes when they change.
+struct CheckedEntries {
+    bits: Vec<AtomicU64>,
+}
+
+/// Entry `index` of a directory leaf. The first use of an entry checks it
+/// as [`decode_entry`] does, the name, the identity of the child and the
+/// relation of the key to the name under the volume's algorithm; later uses
+/// of the same kept leaf find it checked. An entry of a leaf the device does
+/// not keep is checked every time.
+pub(crate) fn checked_entry<'a>(
+    leaf: &'a KeptNode,
+    ident: &Identification,
+    index: usize,
+) -> Result<EntryView<'a>, CoreError> {
+    let item = &leaf.node.items[index];
+    let checked = leaf
+        .derived
+        .get_or_init(|| {
+            let words = leaf.node.items.len().div_ceil(64);
+            Arc::new(CheckedEntries {
+                bits: (0..words).map(|_| AtomicU64::new(0)).collect(),
+            })
+        })
+        .downcast_ref::<CheckedEntries>();
+    let (word, bit) = (index / 64, 1u64 << (index % 64));
+    let known = checked.is_some_and(|checked| checked.bits[word].load(Relaxed) & bit != 0);
+    if !known {
+        decode_entry(ident, &item.key, &item.value)?;
+        if let Some(checked) = checked {
+            checked.bits[word].fetch_or(bit, Relaxed);
+        }
+    }
+    let (name, child_type_hint, child_id) =
+        afsplus_format::dir::tree_entry_parts(&item.value).map_err(shape_error)?;
+    Ok(EntryView {
+        name,
+        child_type_hint,
+        child_id,
+    })
 }
 
 /// Validates only the root node for bounded mount. Descendant paths are
@@ -66,20 +157,41 @@ pub fn validate_root<D: BlockDevice>(
     max_generation: u64,
 ) -> Result<(), CoreError> {
     crate::tree::check_tree_lba(geo, root_lba)?;
-    let mut block = crate::scratch::Block::take(geo.block_size);
-    dev.read_block(root_lba, &mut block)?;
     // Through the same decoded-node cache the descent uses: a mount state is
     // loaded once per operation, and decoding the root again each time was
     // 13 % of the allocations of a create and 26 % of a delete's.
-    let (node, generation) = crate::tree::decode_node(dev, root_lba, &block)?;
+    let kept = crate::tree::load_node(dev, geo, root_lba)?;
+    let (node, generation) = (&kept.node, kept.generation);
     crate::tree::validate_node_identity(
-        &node,
+        node,
         generation,
         spec(owner, max_generation),
         None,
         root_lba,
     )?;
-    crate::tree::validate_node_range(&node, None, None, true)
+    crate::tree::validate_node_range(node, None, None, true)
+}
+
+/// Whether the directory has no entry, from its root alone, which is
+/// checked as a lookup checks it.
+pub fn is_empty<D: BlockDevice>(
+    dev: &mut D,
+    geo: &Geometry,
+    root_lba: u64,
+    owner: u64,
+    max_generation: u64,
+) -> Result<bool, CoreError> {
+    crate::tree::check_tree_lba(geo, root_lba)?;
+    let kept = crate::tree::load_node(dev, geo, root_lba)?;
+    crate::tree::validate_node_identity(
+        &kept.node,
+        kept.generation,
+        spec(owner, max_generation),
+        None,
+        root_lba,
+    )?;
+    crate::tree::validate_node_range(&kept.node, None, None, true)?;
+    Ok(kept.node.is_leaf() && kept.node.items.is_empty())
 }
 
 pub fn load_all<D: BlockDevice>(
@@ -130,13 +242,18 @@ pub fn read_page<D: BlockDevice>(
     start: u64,
     limit: usize,
 ) -> Result<(Vec<DirEntry>, u64), CoreError> {
-    let page = read_range(dev, geo, root_lba, tree, start, limit)?;
-    let entries = page
-        .items
-        .into_iter()
-        .map(|(key, value)| decode_entry(ident, &key, &value))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((entries, page.total_items))
+    let mut entries = Vec::with_capacity(limit);
+    let total = visit_range(dev, geo, root_lba, tree, start, limit, |leaf, index| {
+        let entry = checked_entry(leaf, ident, index)?;
+        entries.push(DirEntry {
+            key: leaf.node.items[index].key.to_vec(),
+            name: entry.name.to_vec(),
+            child_type_hint: entry.child_type_hint,
+            child_id: entry.child_id,
+        });
+        Ok(())
+    })?;
+    Ok((entries, total))
 }
 
 /// Exhaustively validates the directory tree and yields each typed entry in
