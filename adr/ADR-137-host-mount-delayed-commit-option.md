@@ -1,6 +1,6 @@
 # ADR-137: A host mount may delay commits when its user asks
 
-Status: Proposed
+Status: Accepted (2026-11-13)
 Amends: ADR-121
 
 ## Context
@@ -56,4 +56,7 @@ again.
   metadata restore of `Vfs::set_modified`, which still commits on its own.
 - On Linux, where FUSE forwards fsync, `delayed` keeps fsync a durability
   point; whether Linux should default to it is left open.
-- Whether the image wrapper should default to `delayed` is left to the owner.
+- `tools/afsplus-image-mount.sh` keeps `sync` as its default (owner's
+  decision, 2026-11-13): it also serves small edits of an existing image,
+  where a silent loss after a driver crash is the wrong surprise. Populating
+  an image asks for `--commit=delayed`.
