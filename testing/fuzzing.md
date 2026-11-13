@@ -559,13 +559,13 @@ wire command; [the delayed metadata test](../crates/afsplus-vfs/tests/delayed_me
 and [the delayed population test](../crates/afsplus-fuse/tests/delayed_population.rs)
 own their proof, the second at every block-write cut of a population.
 
-The remaining twenty-three methods read: `FileAllocationPage`,
+The remaining twenty-four methods read: `FileAllocationPage`,
 `FileDataPolicy`, `FirstOrphan`, `ListDirectory`, `ListRoot`,
 `LookupInDirectory`, `LookupRoot`, `OrphanCount`, `OrphanObject`,
 `QuarantineContains`, `ReadDirectoryPage`, `ReadFile`, `ReadFileAt`, `ReadLink`,
 `SnapshotAllocationPage`, `SnapshotList`, `SnapshotLookup`,
 `SnapshotReadDirectoryPage`, `SnapshotReadFileAt`, `SnapshotReadLink`,
-`SnapshotStat`, `Stat` and `VisibleMetadata`. The observation of every generated
+`SnapshotStat`, `Stat`, `VisibleMetadata` and `WindowDirectoryEntries`. The observation of every generated
 case reads through `ListDirectory`, `Stat`, `ReadFile`, `ReadLink`,
 `FileAllocationPage`, `FileDataPolicy`, `OrphanCount` and `OrphanObject`, and a
 captured view reads through the five snapshot readers and
@@ -574,7 +574,9 @@ captured view reads through the five snapshot readers and
 `FirstOrphan`, `QuarantineContains` and `VisibleMetadata` are paging and lookup
 accessors of [the developer harness](developer-harness.md), whose bounds the
 [typed caller properties](#typed-caller-and-unicode-properties) and the crate
-tests own.
+tests own. `WindowDirectoryEntries` is the listing of a directory the open
+window changes, proved by
+[the window listing test](../crates/afsplus-vfs/tests/window_listing.rs).
 
 ## Typed caller and Unicode properties
 

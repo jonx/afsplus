@@ -148,12 +148,14 @@ fn a_drawer_made_in_the_window_is_usable_before_the_commit() {
     let parent = vfs.stat(OBJECT_ROOT).unwrap();
     assert_eq!(parent.kind, NodeKind::Directory);
     assert_eq!(vfs.stat(file).unwrap().kind, NodeKind::File);
-    // A read of either directory commits the window first, as it does for a
-    // directory whose entries wait: the entry trees are written by the
-    // commit. One commit answers both listings.
+    // Both directories are listed as the window leaves them, and nothing is
+    // committed for it (tests/window_listing.rs).
     assert_eq!(names(&mut vfs, OBJECT_ROOT), ["work"]);
-    assert!(vfs.generation() > start, "the listing committed the window");
     assert_eq!(names(&mut vfs, drawer), ["note"]);
+    assert_eq!(vfs.generation(), start, "a listing committed the window");
+    assert!(vfs.changes_pending());
+    vfs.sync_filesystem().unwrap();
+    assert!(vfs.generation() > start);
     assert!(!vfs.changes_pending());
 
     vfs.sync_filesystem().unwrap();
@@ -309,6 +311,8 @@ fn removing_a_drawer_that_still_holds_a_pending_file_is_refused() {
     vfs.unlink_file(drawer, "draft.c", ms(30)).unwrap();
     vfs.remove_directory(OBJECT_ROOT, "work", ms(40)).unwrap();
     assert!(names(&mut vfs, OBJECT_ROOT).is_empty());
+    assert_eq!(vfs.generation(), start, "the listing committed the window");
+    vfs.sync_filesystem().unwrap();
     let mut vfs = remount(vfs);
     assert!(names(&mut vfs, OBJECT_ROOT).is_empty());
 

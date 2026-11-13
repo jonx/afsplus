@@ -525,6 +525,7 @@ pub enum ApiMethod {
     WindowSetObjectTimes = 94,
     WindowSetObjectComment = 95,
     WindowSetAttributes = 96,
+    WindowDirectoryEntries = 97,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

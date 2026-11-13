@@ -3265,6 +3265,9 @@ fn every_registered_api_method_executes_under_its_own_guard() {
         )
         .ok();
     volume.window_set_object_protection(file, 5, now).ok();
+    volume
+        .window_directory_entries(afsplus_format::OBJECT_ROOT, 64)
+        .ok();
     volume.window_set_object_owner(file, 502, 20, now).ok();
     volume.window_set_object_times(file, now, now).ok();
     volume

@@ -6242,12 +6242,75 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     /// Whether the open window changes the entries of `directory_id`, so that
-    /// a directory listing must commit it first.
+    /// a listing from its tree must commit the window first
+    /// ([`Self::window_directory_entries`] lists without one).
     pub fn window_changes_directory(&self, directory_id: u64) -> bool {
         self.window.as_ref().is_some_and(|window| {
             window.pending.dir_changes.contains_key(&directory_id)
                 || window.pending.created_directories.contains(&directory_id)
         })
+    }
+
+    /// The entries of `directory_id` as a caller sees them while the open
+    /// window changes them: the committed entries with the window's on top,
+    /// in the order of their keys. `None` when the window changes nothing
+    /// there, and when the directory holds more than `most` committed
+    /// entries: a listing that large pages through the tree, which takes a
+    /// commit first.
+    pub fn window_directory_entries(
+        &mut self,
+        directory_id: u64,
+        most: usize,
+    ) -> Result<Option<Vec<DirEntry>>, CoreError> {
+        self.trace_api(crate::flight::ApiMethod::WindowDirectoryEntries, |volume| {
+            let Some(window) = volume.window.take() else {
+                return Ok(None);
+            };
+            let result = volume.directory_entries_through(&window.pending, directory_id, most);
+            volume.window = Some(window);
+            result
+        })
+    }
+
+    fn directory_entries_through(
+        &mut self,
+        pending: &PendingBatch,
+        directory_id: u64,
+        most: usize,
+    ) -> Result<Option<Vec<DirEntry>>, CoreError> {
+        let created = pending.created_directories.contains(&directory_id);
+        let changes = pending.dir_changes.get(&directory_id);
+        if changes.is_none() && !created {
+            return Ok(None);
+        }
+        let mut entries: BTreeMap<Vec<u8>, DirEntry> = BTreeMap::new();
+        // A directory the window created has no committed entry yet.
+        if !created {
+            let page = self.read_directory_page_untraced(
+                directory_id,
+                None,
+                most.clamp(1, MAX_DIRECTORY_PAGE_ENTRIES),
+            )?;
+            if !page.eof {
+                return Ok(None);
+            }
+            for entry in page.entries {
+                entries.insert(entry.key.clone(), entry);
+            }
+        }
+        if let Some(changes) = changes {
+            for (key, change) in changes {
+                match change {
+                    Some(entry) => {
+                        entries.insert(key.clone(), entry.clone());
+                    }
+                    None => {
+                        entries.remove(key);
+                    }
+                }
+            }
+        }
+        Ok(Some(entries.into_values().collect()))
     }
 
     /// The object record every caller sees: the open window's when it holds

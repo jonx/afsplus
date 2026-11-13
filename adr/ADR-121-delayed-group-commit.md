@@ -191,6 +191,22 @@ commit had consumed the window; it reports what the window held.
 small queue, and `afsplus-aros-ffi/tests/random_io.rs` the model test that
 found the first on a copy of the volume.
 
+**Amendment, 2026-11-13 (a directory is listed through the window).** A
+listing of a directory whose entries waited in the window committed the
+window first: a checkpoint and a device flush, 5 to 11 ms in a QEMU lab,
+for every listing of a directory just written to. A program that creates a
+file and then looks a name up without regard to case, as Wine does, lists
+the directory each time. A listing that starts while the window changes
+the directory is now answered from a list made at that moment, the
+committed entries with the window's on top in key order, and commits
+nothing. The pass shows the directory as it was when it began, whatever is
+committed or changed meanwhile; a rewind starts a pass on the directory of
+now. A directory of more than 1,024 entries is committed and paged through
+its tree as before, so the list has a bound. In that lab, 25 listings of
+a directory of 793 entries after a create went from 224 to 460 us each,
+the first one carrying the commit, to 50 to 57 us.
+`afsplus-vfs/tests/window_listing.rs` holds the cases.
+
 ## Consequences
 
 - An unprotected crash or power cut on AROS loses up to the maximum age of

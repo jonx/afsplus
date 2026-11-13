@@ -30,6 +30,7 @@ pub use afsplus_core::AttributeWriteMode;
 use afsplus_core::{
     mount_with_options, mount_with_snapshot_limits, CoreError, MountMode, MountOptions,
 };
+use afsplus_format::dir::DirEntry;
 use afsplus_format::ident::{
     NameKeyAlgorithm, COMPAT_DATA_POLICY, INCOMPAT_INTENT_LOG_DATA_UPDATES,
     RO_COMPAT_ORPHAN_DIRECTORY, RO_COMPAT_SHARED_EXTENTS,
@@ -467,6 +468,37 @@ const RECLAIM_STEPS_CROWDED: usize = 64;
 /// Orphan cleanups, and reclaim steps, one idle tick of a delayed mount runs.
 const IDLE_STEPS_PER_TICK: usize = 32;
 
+/// Entries of a directory that is listed through the open window, from a
+/// list in memory; a larger one is committed and paged through its tree.
+pub const WINDOW_LISTING_MAX: usize = 1_024;
+
+/// A listing begun while the window changed its directory.
+enum WindowListing {
+    /// The directory as it was at the rewind, in key order.
+    Entries(Vec<DirEntry>),
+    /// The pass reached its end, of this many entries, and gave its list
+    /// back.
+    Done(u64),
+}
+
+/// A directory entry as the VFS hands it out.
+fn listed(entry: DirEntry) -> DirectoryEntry {
+    DirectoryEntry {
+        name: entry.name,
+        object_id: entry.child_id,
+        // Three kinds, not two. Folding everything that was not a file into
+        // a directory reported every symlink in every listing as a
+        // directory. The format admits only 1, 2 and 3 and refuses anything
+        // else when it decodes the entry, so the last arm is the directory
+        // case rather than a guess at an unknown one.
+        kind: match entry.child_type_hint {
+            1 => NodeKind::File,
+            3 => NodeKind::Symlink,
+            _ => NodeKind::Directory,
+        },
+    }
+}
+
 /// A state of the volume the VFS observes but no caller asked about, and
 /// that no result can report: nothing failed, so there is no error to
 /// return. An adapter drains them with [`Vfs::take_health_notes`] and turns
@@ -533,6 +565,9 @@ pub struct Vfs<D: BlockDevice> {
     /// from when that happens, and it belongs to the handle rather than to
     /// an adapter, because every adapter needs it.
     directory_resume: BTreeMap<Handle, Vec<u8>>,
+    /// Listings begun while the window changed their directory
+    /// ([`Self::read_directory`]).
+    window_listings: BTreeMap<Handle, WindowListing>,
     next_handle: Handle,
     idle_maintenance: bool,
     /// The checkpoint generation and reclaim backlog an idle reclaim step
@@ -606,6 +641,7 @@ impl<D: BlockDevice> Vfs<D> {
             snapshot_readers: BTreeMap::new(),
             snapshot_directories: BTreeMap::new(),
             directory_resume: BTreeMap::new(),
+            window_listings: BTreeMap::new(),
             next_handle: 1,
             idle_maintenance: true,
             idle_reclaim_rest: None,
@@ -1251,6 +1287,7 @@ impl<D: BlockDevice> Vfs<D> {
     pub fn close(&mut self, handle: Handle) -> Result<(), VfsError> {
         let state = self.handles.remove(&handle).ok_or(VfsError::Stale)?;
         self.directory_resume.remove(&handle);
+        self.window_listings.remove(&handle);
         let OpenHandle::File { object_id, .. } = state else {
             return Ok(());
         };
@@ -1392,18 +1429,52 @@ impl<D: BlockDevice> Vfs<D> {
             None => return Err(VfsError::Stale),
         };
         self.ordinary_access(object_id)?;
-        // A directory whose entries wait in the window is listed after they
-        // are committed; the cursor's recovery below absorbs the new
-        // generation.
-        if self.volume.window_changes_directory(object_id) {
-            self.commit_window(Timespec::default())?;
-        }
         // Cookie zero is a rewind: the caller is asking for the directory
         // from its start, so there is nothing to resume after and a resume
         // point left from an earlier pass would silently skip the entries
         // before it.
         if cookie == 0 {
             self.directory_resume.remove(&handle);
+            // A directory whose entries wait in the window is listed as the
+            // window leaves it, from a list made here: a commit for every
+            // listing of a directory just written to was a checkpoint and a
+            // device flush each, and a program that creates a file and then
+            // looks a name up without regard to case does exactly that.
+            match self
+                .volume
+                .window_directory_entries(object_id, WINDOW_LISTING_MAX)?
+            {
+                Some(entries) => {
+                    self.window_listings
+                        .insert(handle, WindowListing::Entries(entries));
+                }
+                None => {
+                    self.window_listings.remove(&handle);
+                }
+            }
+        }
+        match self.window_listings.get(&handle) {
+            Some(WindowListing::Entries(_)) => {
+                return self.read_window_listing(handle, cookie, max_entries);
+            }
+            // The pass is over; the caller asks once more and is told so.
+            Some(WindowListing::Done(total)) if cookie >= *total => {
+                return Ok(DirectoryPage {
+                    entries: Vec::new(),
+                    next_cookie: cookie,
+                    eof: true,
+                });
+            }
+            Some(WindowListing::Done(_)) => {
+                self.window_listings.remove(&handle);
+            }
+            None => {}
+        }
+        // A larger directory, or one changed after its listing began, is
+        // listed from the tree after the changes are committed; the
+        // cursor's recovery below absorbs the new generation.
+        if self.volume.window_changes_directory(object_id) {
+            self.commit_window(Timespec::default())?;
         }
         // A cursor carries the generation it was made in, and the core
         // refuses one the volume has moved past. That is right for the
@@ -1451,29 +1522,7 @@ impl<D: BlockDevice> Vfs<D> {
                     }
                 }
             }
-            // The entries that may be shown are kept where they are, in
-            // their order; the page's vector becomes the result.
-            let mut visible = std::mem::take(&mut page.entries);
-            let mut kept = 0;
-            for index in 0..visible.len() {
-                let child_id = visible[index].child_id;
-                match self.restore_stage_private(child_id) {
-                    Ok(false) => {
-                        visible.swap(kept, index);
-                        kept += 1;
-                    }
-                    Ok(true) => {}
-                    Err(VfsError::Corrupt(_)) => {
-                        if self.hidden_corrupt.len() < HEALTH_NOTES_MAX
-                            && self.hidden_corrupt.insert(child_id)
-                        {
-                            self.push_note(HealthNote::HiddenCorruptEntry);
-                        }
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            visible.truncate(kept);
+            let visible = self.visible_entries(std::mem::take(&mut page.entries))?;
             if !visible.is_empty() || page.eof {
                 break visible;
             }
@@ -1482,27 +1531,77 @@ impl<D: BlockDevice> Vfs<D> {
                 .read_directory_page(object_id, Some(page.next), max_entries)?;
         };
         Ok(DirectoryPage {
-            entries: visible_entries
-                .into_iter()
-                .map(|entry| DirectoryEntry {
-                    name: entry.name,
-                    object_id: entry.child_id,
-                    // Three kinds, not two. Folding everything that was not a
-                    // file into a directory reported every symlink in every
-                    // listing as a directory. The format admits only 1, 2 and
-                    // 3 and refuses anything else when it decodes the entry,
-                    // so the last arm is the directory case rather than a
-                    // guess at an unknown one.
-                    kind: match entry.child_type_hint {
-                        1 => NodeKind::File,
-                        3 => NodeKind::Symlink,
-                        _ => NodeKind::Directory,
-                    },
-                })
-                .collect(),
+            entries: visible_entries.into_iter().map(listed).collect(),
             next_cookie: page.next.ordinal,
             eof: page.eof,
         })
+    }
+
+    /// The entries of a page that may be shown, in their order; the page's
+    /// vector becomes the result.
+    fn visible_entries(&mut self, mut entries: Vec<DirEntry>) -> Result<Vec<DirEntry>, VfsError> {
+        let mut kept = 0;
+        for index in 0..entries.len() {
+            let child_id = entries[index].child_id;
+            match self.restore_stage_private(child_id) {
+                Ok(false) => {
+                    entries.swap(kept, index);
+                    kept += 1;
+                }
+                Ok(true) => {}
+                Err(VfsError::Corrupt(_)) => {
+                    if self.hidden_corrupt.len() < HEALTH_NOTES_MAX
+                        && self.hidden_corrupt.insert(child_id)
+                    {
+                        self.push_note(HealthNote::HiddenCorruptEntry);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        entries.truncate(kept);
+        Ok(entries)
+    }
+
+    /// A page of a listing made while the window changed the directory.
+    /// Its cookies are positions in that list, which stands until the
+    /// caller rewinds or closes: the pass shows the directory as it was
+    /// when it began, whatever is committed or changed meanwhile.
+    fn read_window_listing(
+        &mut self,
+        handle: Handle,
+        cookie: u64,
+        max_entries: usize,
+    ) -> Result<DirectoryPage, VfsError> {
+        let mut at = cookie;
+        loop {
+            let Some(WindowListing::Entries(entries)) = self.window_listings.get(&handle) else {
+                return Err(VfsError::Stale);
+            };
+            let total = entries.len() as u64;
+            let from = at.min(total) as usize;
+            let to = from.saturating_add(max_entries).min(entries.len());
+            let page = entries[from..to].to_vec();
+            at = to as u64;
+            let eof = at >= total;
+            if let Some(last) = page.last() {
+                // Where the tree's listing takes over, should the caller go
+                // back into a pass that is over.
+                self.directory_resume.insert(handle, last.name.clone());
+            }
+            let visible = self.visible_entries(page)?;
+            if eof {
+                self.window_listings
+                    .insert(handle, WindowListing::Done(total));
+            }
+            if !visible.is_empty() || eof || max_entries == 0 {
+                return Ok(DirectoryPage {
+                    entries: visible.into_iter().map(listed).collect(),
+                    next_cookie: at,
+                    eof,
+                });
+            }
+        }
     }
 
     /// Rebinds a directory handle to the current generation and returns the
