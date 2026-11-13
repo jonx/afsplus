@@ -74,6 +74,14 @@ does not use.
 With macFUSE 5.4.0 on macOS 26.6.2 an upgrade left the module registered but
 disabled, and the `pluginkit` command alone was enough, with no restart.
 
+On macOS 27.2 (26B123) with macFUSE 5.5.0 the switch in System Settings is
+the step that works: a mount that failed with `File system extension not
+enabled` succeeded once the extension was switched on there. On that release
+`pluginkit -m` does not list the macFUSE modules even while a volume is
+mounted, and `tools/macos-fskit-modules.sh check` cannot read
+`enabledModules.plist` (permission denied), so neither is a reliable
+diagnosis; try a mount of a scratch image instead.
+
 ## Diagnose without changing the system
 
 From the repository root:
