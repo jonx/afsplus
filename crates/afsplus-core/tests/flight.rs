@@ -3255,6 +3255,22 @@ fn every_registered_api_method_executes_under_its_own_guard() {
     volume.set_object_times(file, now, now).ok();
     volume.set_object_comment(file, "a comment", now).ok();
     volume.object_comment(file).ok();
+    // The same edits staged in the delayed window, then its commit.
+    volume
+        .window_set_attributes(
+            file,
+            &[("user.two", Some(b"2".as_slice()))],
+            AttributeWriteMode::Upsert,
+            now,
+        )
+        .ok();
+    volume.window_set_object_protection(file, 5, now).ok();
+    volume.window_set_object_owner(file, 502, 20, now).ok();
+    volume.window_set_object_times(file, now, now).ok();
+    volume
+        .window_set_object_comment(file, "a staged comment", now)
+        .ok();
+    volume.window_commit(now).ok();
     volume.set_security_projection_policy(SecurityProjectionPolicy::Preserve);
     volume
         .set_security_descriptor(file, 1, 0, b"descriptor", now)
