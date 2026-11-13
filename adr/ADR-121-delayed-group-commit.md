@@ -163,6 +163,34 @@ keeps before it writes, not the floor behind the commit, and 1,024 blocks of
 headroom on a volume with 542 free is the volume being genuinely short of
 space rather than work being wasted.
 
+**Amendment, 2026-11-13 (the reclaim queue has a bound, and a lost window
+keeps its identifiers).** Decision 9 bounds the waiting deletions and the
+free space of a mount that is never idle. It did not bound the reclaim
+queue. The transactions of a window return no block to the free pool
+(ADR-037, ADR-063), so what overwrites and truncations supersede waited
+there for idle time, and a volume written without a pause had none: on a
+32 GiB volume two minutes of 4 KiB overwrites, truncations and file
+turnover from twelve threads filled the queue's 64 tables, which are sealed
+with what there is and far from full. The commit of the next window was
+refused ("reclaim backlog exceeds prototype capacity") and the window was
+abandoned with every file created in it. A commit now also returns blocks
+when the queue holds more than 16,384 or a quarter of its tables are in
+use: up to 8 reclaim steps, 64 when the tables are filling, each a
+checkpoint that returns up to 4,096 blocks, where a full window of
+overwrites supersedes a few hundred. A window that is refused all the same
+is followed by the same relief, so the next one can be published.
+
+The loss showed a second defect. The files created after it were given the
+object identifiers of the lost ones, and the handles still open on those
+read and wrote the new files: two files with one content. Object
+identifiers are never reused; a lost window now leaves the allocator where
+it had brought it, and its files answer "object not found" through their
+old handles. The loss also reported 0 operations, because the refused
+commit had consumed the window; it reports what the window held.
+`afsplus-vfs/tests/busy_volume.rs` holds both cases on a volume with a
+small queue, and `afsplus-aros-ffi/tests/random_io.rs` the model test that
+found the first on a copy of the volume.
+
 ## Consequences
 
 - An unprotected crash or power cut on AROS loses up to the maximum age of

@@ -50,7 +50,10 @@ AFS+ is ahead on create and read, level on rename, behind on list and delete.
 Delete is the one phase with a gap worth naming: a Fast File System delete
 unlinks a name and marks blocks free; an AFS+ delete stages the removal,
 commits it with its window, and gives the blocks back in idle time, which is
-what lets a cut lose nothing.
+what lets a cut lose nothing. A volume that is never idle gives them
+back at its commits once 16,384 wait
+([ADR-121](../adr/ADR-121-delayed-group-commit.md), amendment of
+2026-11-13).
 
 ## How it got there
 

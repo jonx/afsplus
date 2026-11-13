@@ -92,12 +92,16 @@ fn pattern(file: usize, block: u64) -> [u8; BLOCK] {
 struct File {
     name: String,
     handle: u64,
+    object: u64,
     size: u64,
     written: Vec<bool>,
 }
 
 struct Run {
     fs: *mut AfsplusAros,
+    /// The lock of the directory the files live in; 0 is the root.
+    base: u64,
+    first_owner: usize,
     seed: u64,
     step: usize,
     seconds: i64,
@@ -110,7 +114,7 @@ impl Run {
         assert_eq!(
             afsplus_aros_open(
                 self.fs,
-                0,
+                self.base,
                 name.as_ptr(),
                 name.len() as u32,
                 mode,
@@ -126,14 +130,22 @@ impl Run {
         handle
     }
     fn create(&self, slot: usize, generation: usize) -> File {
-        let name = format!("iostress-{}-{slot}.dat", 4000 + generation * 7);
+        let name = format!("iostress-{}-{slot}.dat", self.first_owner + generation * 7);
         // A new file is held exclusively; the stress test shares its files.
         let handle = self.open(&name, AFSPLUS_AROS_OPEN_NEW_FILE);
         assert_eq!(afsplus_aros_close(self.fs, handle), 0);
         let handle = self.open(&name, AFSPLUS_AROS_OPEN_READ_WRITE);
+        // SAFETY: plain integers, written by the call.
+        let mut info: AfsplusArosFileInfo = unsafe { std::mem::zeroed() };
+        let mut stored = [0u8; 108];
+        assert_eq!(
+            afsplus_aros_examine_file(self.fs, handle, &mut info, stored.as_mut_ptr(), 108),
+            0
+        );
         File {
             name,
             handle,
+            object: info.object_id,
             size: 0,
             written: vec![false; BLOCKS as usize],
         }
@@ -174,7 +186,16 @@ impl Run {
     }
 }
 
-fn run(seed: u64, operations: usize, cache: u32, delayed: bool, fillers: usize) {
+#[allow(clippy::too_many_arguments)]
+fn run(
+    seed: u64,
+    operations: usize,
+    cache: u32,
+    delayed: bool,
+    fillers: usize,
+    step_ms: u64,
+    busy_ticks: bool,
+) {
     let mut device = format(MemoryBackend::new(BLOCK, DEVICE), true);
     let fs = mount(&mut device);
     let mut granted = 0;
@@ -182,6 +203,25 @@ fn run(seed: u64, operations: usize, cache: u32, delayed: bool, fillers: usize) 
     if delayed {
         assert_eq!(afsplus_aros_set_commit_policy(fs, 5_000, 1_000), 0);
     }
+    exercise(
+        fs, 0, 4000, seed, operations, delayed, fillers, step_ms, 50, busy_ticks,
+    );
+    assert_eq!(afsplus_aros_unmount(fs), 0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exercise(
+    fs: *mut AfsplusAros,
+    base: u64,
+    first_owner: usize,
+    seed: u64,
+    operations: usize,
+    delayed: bool,
+    fillers: usize,
+    step_ms: u64,
+    turnover: u64,
+    busy_ticks: bool,
+) {
     let mut state = seed | 1;
     let mut next = move || {
         state ^= state << 13;
@@ -191,6 +231,8 @@ fn run(seed: u64, operations: usize, cache: u32, delayed: bool, fillers: usize) 
     };
     let mut run = Run {
         fs,
+        base,
+        first_owner,
         seed,
         step: 0,
         seconds: 10,
@@ -212,11 +254,12 @@ fn run(seed: u64, operations: usize, cache: u32, delayed: bool, fillers: usize) 
     }
     generation += OWNERS;
     let mut buffer = [0u8; BLOCK];
+    let (mut pending, mut quiet) = (0u32, 0u32);
     for step in 0..operations {
         run.step = step;
         // Time passes as it does under load: a few milliseconds a call.
-        run.millis += (next() % 8) as u32;
-        if run.millis >= 1000 {
+        run.millis += (next() % step_ms) as u32;
+        while run.millis >= 1000 {
             run.millis -= 1000;
             run.seconds += 1;
         }
@@ -224,7 +267,13 @@ fn run(seed: u64, operations: usize, cache: u32, delayed: bool, fillers: usize) 
         let index = next() as usize % files.len();
         let slot = index % FILES;
         let block = next() % BLOCKS;
-        let what = next() % 1000;
+        // Owners end once in `turnover` operations; the rest keep the
+        // shares of the stress test.
+        let what = if next() % turnover == 0 {
+            999
+        } else {
+            next() % 980
+        };
         if what < 450 {
             let file = &files[index];
             let mut count = 0;
@@ -351,7 +400,7 @@ fn run(seed: u64, operations: usize, cache: u32, delayed: bool, fillers: usize) 
                     assert_eq!(
                         afsplus_aros_delete_object(
                             fs,
-                            0,
+                            base,
                             file.name.as_ptr(),
                             file.name.len() as u32,
                             seconds,
@@ -366,9 +415,29 @@ fn run(seed: u64, operations: usize, cache: u32, delayed: bool, fillers: usize) 
                 files[owner * FILES + slot] = run.create(slot, generation);
             }
             generation += 1;
+            for (index, file) in files.iter().enumerate() {
+                for other in &files[index + 1..] {
+                    assert_ne!(
+                        file.object, other.object,
+                        "seed {seed} step {step}: {} and {} are one object",
+                        file.name, other.name
+                    );
+                }
+            }
         }
-        if delayed && step % 16 == 15 {
-            let mut pending = 0;
+        // The handler's rule (native/aros/afsplus_commit_tick.h): ask after
+        // a packet that may have changed the volume, while the library says
+        // work waits, and otherwise once in 64 packets.
+        quiet += 1;
+        let asked = if busy_ticks {
+            // A handler under load: every batch of packets holds a write,
+            // so the library is never asked while its window is closed.
+            (450..850).contains(&what)
+        } else {
+            pending != 0 || what >= 450 || quiet >= 64
+        };
+        if delayed && asked {
+            quiet = 0;
             assert_eq!(
                 afsplus_aros_commit_due(fs, seconds, nanos, &mut pending),
                 0,
@@ -376,10 +445,178 @@ fn run(seed: u64, operations: usize, cache: u32, delayed: bool, fillers: usize) 
             );
         }
     }
+    if std::env::var("RANDOM_IO_REPORT").is_ok() {
+        eprintln!(
+            "random_io: {generation} owners, objects up to {}, {} s of clock",
+            files.iter().map(|file| file.object).max().unwrap_or(0),
+            run.seconds
+        );
+    }
     for file in &files {
         assert_eq!(afsplus_aros_close(fs, file.handle), 0);
     }
+}
+
+/// An image file read where it lies, with what is written kept in memory:
+/// the image is not changed.
+struct Overlay {
+    image: std::fs::File,
+    written: std::collections::HashMap<u64, Box<[u8; BLOCK]>>,
+}
+
+unsafe extern "C" fn overlay_read(
+    context: *mut c_void,
+    lba: u64,
+    destination: *mut u8,
+    length: u32,
+) -> i32 {
+    use std::os::unix::fs::FileExt;
+    // SAFETY: the test keeps the overlay and the buffer alive for the call.
+    let overlay = unsafe { &mut *context.cast::<Overlay>() };
+    let destination = unsafe { slice::from_raw_parts_mut(destination, length as usize) };
+    for (index, block) in destination.chunks_exact_mut(BLOCK).enumerate() {
+        let at = lba + index as u64;
+        match overlay.written.get(&at) {
+            Some(data) => block.copy_from_slice(&data[..]),
+            None => {
+                if overlay
+                    .image
+                    .read_exact_at(block, at * BLOCK as u64)
+                    .is_err()
+                {
+                    return 5;
+                }
+            }
+        }
+    }
+    0
+}
+unsafe extern "C" fn overlay_write(
+    context: *mut c_void,
+    lba: u64,
+    source: *const u8,
+    length: u32,
+) -> i32 {
+    // SAFETY: as above.
+    let overlay = unsafe { &mut *context.cast::<Overlay>() };
+    let source = unsafe { slice::from_raw_parts(source, length as usize) };
+    for (index, block) in source.chunks_exact(BLOCK).enumerate() {
+        overlay
+            .written
+            .insert(lba + index as u64, Box::new(block.try_into().unwrap()));
+    }
+    0
+}
+unsafe extern "C" fn overlay_flush(_context: *mut c_void) -> i32 {
+    0
+}
+
+/// The same exercise on a copy of an existing volume, in one of its
+/// directories: RANDOM_IO_IMAGE names the image, RANDOM_IO_DIRECTORY the
+/// directory (the root without it), RANDOM_IO_OPERATIONS how long,
+/// RANDOM_IO_TURNOVER how many operations between two ends of an owner.
+/// With RANDOM_IO_BUSY the library is asked for its commits only after a
+/// write, as by a handler that is never idle: four million operations of
+/// it on a 32 GiB volume filled the reclaim queue and lost a window
+/// (afsplus-vfs tests/busy_volume.rs). A volume that has lived has trees
+/// and maps a new one has not.
+#[test]
+fn random_io_on_an_existing_volume() {
+    let Ok(path) = std::env::var("RANDOM_IO_IMAGE") else {
+        return;
+    };
+    let image = std::fs::File::open(&path).unwrap();
+    let total_blocks = image.metadata().unwrap().len() / BLOCK as u64;
+    let mut overlay = Overlay {
+        image,
+        written: Default::default(),
+    };
+    let callbacks = AfsplusArosDevice {
+        abi_version: AFSPLUS_AROS_ABI_VERSION,
+        struct_size: size_of::<AfsplusArosDevice>() as u32,
+        context: ptr::from_mut(&mut overlay).cast::<c_void>(),
+        block_size: BLOCK as u32,
+        max_transfer_blocks: 256,
+        total_blocks,
+        read_block: Some(overlay_read),
+        write_block: Some(overlay_write),
+        flush: Some(overlay_flush),
+    };
+    let config = AfsplusArosMountConfig {
+        abi_version: AFSPLUS_AROS_ABI_VERSION,
+        struct_size: size_of::<AfsplusArosMountConfig>() as u32,
+        mount_mode: AFSPLUS_AROS_MOUNT_READ_WRITE,
+        name_encoding: AFSPLUS_AROS_ENCODING_UTF8,
+        volume_name: b"AFS+".as_ptr(),
+        volume_name_length: 4,
+        max_file_handles: 1024,
+        max_locks: 1024,
+        max_file_info_name_bytes: 107,
+        flags: 0,
+        snapshot_max_edit_records: 0,
+        snapshot_max_views: 0,
+        snapshot_reclaim_records: 0,
+    };
+    let mut fs = ptr::null_mut();
+    assert_eq!(afsplus_aros_mount(&callbacks, &config, &mut fs), 0);
+    let mut granted = 0;
+    assert_eq!(afsplus_aros_set_cache_blocks(fs, 65536, &mut granted), 0);
+    assert_eq!(afsplus_aros_set_commit_policy(fs, 5_000, 1_000), 0);
+    let mut taken = 0;
+    assert_eq!(afsplus_aros_set_window_ops(fs, 512, &mut taken), 0);
+    let mut base = 0;
+    if let Ok(directory) = std::env::var("RANDOM_IO_DIRECTORY") {
+        assert_eq!(
+            afsplus_aros_locate_path(
+                fs,
+                0,
+                directory.as_ptr(),
+                directory.len() as u32,
+                AFSPLUS_AROS_LOCK_SHARED,
+                &mut base
+            ),
+            0
+        );
+    }
+    let operations = std::env::var("RANDOM_IO_OPERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60000);
+    let turnover = std::env::var("RANDOM_IO_TURNOVER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5000);
+    let busy = std::env::var("RANDOM_IO_BUSY").is_ok();
+    exercise(
+        fs,
+        base,
+        101,
+        0x2545_f491_4f6c_dd1d,
+        operations,
+        true,
+        0,
+        12,
+        turnover,
+        busy,
+    );
     assert_eq!(afsplus_aros_unmount(fs), 0);
+}
+
+/// Minutes of the handler's clock, so that the window closes many times
+/// while files come and go; the second seed as a handler that is never idle.
+#[test]
+fn random_io_over_many_commits() {
+    for seed in 1..=2u64 {
+        run(
+            seed.wrapping_mul(0x2545_f491_4f6c_dd1d),
+            30000,
+            16384,
+            true,
+            100,
+            60,
+            seed == 2,
+        );
+    }
 }
 
 #[test]
@@ -398,6 +635,8 @@ fn random_io_matches_the_model() {
                         cache,
                         delayed,
                         fillers,
+                        8,
+                        false,
                     );
                 }
             }

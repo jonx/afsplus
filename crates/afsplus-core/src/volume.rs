@@ -481,6 +481,9 @@ pub struct Volume<D: BlockDevice> {
     security_projection: SecurityProjectionPolicy,
     window: Option<OpenWindow>,
     window_poisoned: bool,
+    /// Operations of the window a refused commit consumed, for the discard
+    /// that follows to report.
+    window_failed_ops: u32,
     last_commit: Option<CommitStats>,
     /// The transaction-scoped shared-reference edit (ADR-061), keyed by the
     /// generation it was opened for. `next_generation` clears it so an
@@ -694,6 +697,7 @@ impl<D: BlockDevice> Volume<D> {
             security_projection: SecurityProjectionPolicy::default(),
             window: None,
             window_poisoned: false,
+            window_failed_ops: 0,
             last_commit: None,
             shared_refs: None,
             pending_layout_promotions: 0,
@@ -940,6 +944,16 @@ impl<D: BlockDevice> Volume<D> {
     /// Blocks currently quarantined in the reclaim queue.
     pub fn reclaim_pending_blocks(&self) -> u64 {
         self.state.reclaim_root.pending_blocks
+    }
+
+    /// Sealed tables the reclaim queue holds, and the most the volume's
+    /// format lets it hold. A commit that would seal one more is refused
+    /// ("reclaim backlog exceeds prototype capacity"), so whoever defers
+    /// reclamation watches this and not only the count of blocks: tables
+    /// are sealed with what there is, far from full.
+    pub fn reclaim_queue_tables(&self) -> (usize, usize) {
+        let root = &self.state.reclaim_root;
+        (root.table_refs.len(), root.caps.table_refs as usize)
     }
 
     /// Sets the per-transaction reclamation budget (blocks promoted from the
@@ -8148,15 +8162,32 @@ impl<D: BlockDevice> Volume<D> {
 
     fn window_discard_untraced(&mut self) -> u32 {
         let Some(window) = self.window.take() else {
+            // A refused commit has consumed the window already.
             self.window_poisoned = false;
-            return 0;
+            return std::mem::take(&mut self.window_failed_ops);
         };
-        let lost = window.logged_records + window.unlogged.len() as u32;
+        let lost = window.logged_records
+            + window.unlogged.len() as u32
+            + std::mem::take(&mut self.window_failed_ops);
         let generation = window.generation;
+        self.retire_object_ids(window.pending.next_object_id);
         drop(window);
         self.window_poisoned = false;
         self.flight_window_event(generation, crate::flight::EventKind::WindowClosed, None);
         lost
+    }
+
+    /// Keeps the object identifiers a lost window gave out from being given
+    /// out again. The window's objects are gone, but whoever opened them
+    /// still names them by identifier: a file created after the loss under
+    /// the same identifier was read and written through the handles of the
+    /// lost one, two files sharing their contents. Identifiers are
+    /// monotonic and never reused; the next checkpoint records the
+    /// watermark, and the gap is one a scrubbed create leaves too.
+    fn retire_object_ids(&mut self, next_object_id: u64) {
+        if next_object_id > self.checkpoint.next_object_id {
+            self.checkpoint.next_object_id = next_object_id;
+        }
     }
 
     pub fn window_commit(&mut self, now: Timespec) -> Result<(), CoreError> {
@@ -8186,6 +8217,8 @@ impl<D: BlockDevice> Volume<D> {
             );
         }
         let force = window.logged_records > 0;
+        let allocated = window.pending.next_object_id;
+        let operations = window.logged_records + window.unlogged.len() as u32;
         let result = self.materialize_batch(
             window.tx,
             window.pending,
@@ -8195,6 +8228,8 @@ impl<D: BlockDevice> Volume<D> {
             CommitData::Prepared(Vec::new()),
         );
         if result.is_err() {
+            self.retire_object_ids(allocated);
+            self.window_failed_ops = self.window_failed_ops.saturating_add(operations);
             self.window_poisoned = true;
             self.flight_window_event(generation, crate::flight::EventKind::WindowFailed, None);
         }

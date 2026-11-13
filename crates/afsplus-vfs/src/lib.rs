@@ -452,6 +452,18 @@ fn delayed_room_blocks() -> u64 {
     ROOM_FOR_METADATA_BLOCKS + u64::from(DELAYED_WINDOW_OPS_MAX)
 }
 
+/// Blocks a delayed mount leaves in the reclaim queue for idle time. Past
+/// it, or with a quarter of the queue's tables in use, the commit of a
+/// window returns blocks at once ([`Vfs::relieve_reclaim_queue`]).
+pub const DELAYED_RECLAIM_MAX_BLOCKS: u64 = 16_384;
+
+/// Reclaim steps one commit runs for a backlog past
+/// [`DELAYED_RECLAIM_MAX_BLOCKS`], and for a queue whose tables are filling.
+/// A step returns up to the reclaim batch, 4 096 blocks, and costs a
+/// checkpoint; a full window of overwrites supersedes a few hundred.
+const RECLAIM_STEPS_PER_COMMIT: usize = 8;
+const RECLAIM_STEPS_CROWDED: usize = 64;
+
 /// Orphan cleanups, and reclaim steps, one idle tick of a delayed mount runs.
 const IDLE_STEPS_PER_TICK: usize = 32;
 
@@ -679,6 +691,9 @@ impl<D: BlockDevice> Vfs<D> {
             Err(_) => {
                 let lost = self.volume.window_discard();
                 self.forget_window();
+                // A queue at its capacity is one reason a window cannot be
+                // published; emptied, the next one can.
+                self.relieve_reclaim_queue(now);
                 Err(VfsError::WindowLost(lost))
             }
         }
@@ -686,11 +701,12 @@ impl<D: BlockDevice> Vfs<D> {
 
     /// What follows every commit of the window. The orphans its deletions
     /// left, and the blocks the commit superseded, are cleaned in idle time
-    /// ([`Self::commit_if_due`]). Two things are cleaned now: a backlog past
-    /// [`DELAYED_ORPHANS_MAX`], down to it, and whatever keeps the volume
-    /// below [`delayed_room_blocks`] available. Without the second, a volume
-    /// that was never idle ran out of space in the commit of its deletes:
-    /// each window of 512 took some 570 blocks and none came back.
+    /// ([`Self::commit_if_due`]). Three things are cleaned now: a backlog past
+    /// [`DELAYED_ORPHANS_MAX`], down to it, whatever keeps the volume
+    /// below [`delayed_room_blocks`] available, and a reclaim queue past its
+    /// bound. Without the second, a volume that was never idle ran out of
+    /// space in the commit of its deletes: each window of 512 took some 570
+    /// blocks and none came back. Without the third it filled the queue.
     /// Whether a window was open, so a caller knows a commit published
     /// something and the backlog is worth looking at again.
     fn after_window_commit(&mut self, now: Timespec) {
@@ -723,6 +739,38 @@ impl<D: BlockDevice> Vfs<D> {
             if !matches!(step, Ok(steps) if steps > 0) {
                 break;
             }
+        }
+        self.relieve_reclaim_queue(now);
+    }
+
+    /// Returns blocks from a reclaim queue that has grown past what a
+    /// delayed mount leaves for idle time. The transactions of a window
+    /// return none (logged extents must be free in the committed bitmaps),
+    /// so on a volume that was never idle the queue only grew: two minutes
+    /// of overwrites and truncations filled its tables, the next commit was
+    /// refused, and its window, with every file created in it, was lost.
+    /// The window is closed here, so a reclaim step may run.
+    fn relieve_reclaim_queue(&mut self, now: Timespec) {
+        if !self.idle_maintenance || !self.inline_maintenance {
+            return;
+        }
+        let mut steps = 0;
+        loop {
+            let (tables, most) = self.volume.reclaim_queue_tables();
+            let crowded = tables * 4 >= most.max(1);
+            let allowed = if crowded {
+                RECLAIM_STEPS_CROWDED
+            } else if self.volume.reclaim_pending_blocks() > DELAYED_RECLAIM_MAX_BLOCKS {
+                RECLAIM_STEPS_PER_COMMIT
+            } else {
+                0
+            };
+            if steps >= allowed
+                || !matches!(self.reclaim_space_inner(1, now), Ok(blocks) if blocks > 0)
+            {
+                break;
+            }
+            steps += 1;
         }
     }
 
@@ -1016,6 +1064,12 @@ impl<D: BlockDevice> Vfs<D> {
     /// Blocks retired but not yet returned to the free pool.
     pub fn reclaim_pending_blocks(&self) -> u64 {
         self.volume.reclaim_pending_blocks()
+    }
+
+    /// Sealed tables of the reclaim queue, and the most it may hold
+    /// ([`afsplus_core::Volume::reclaim_queue_tables`]).
+    pub fn reclaim_queue_tables(&self) -> (usize, usize) {
+        self.volume.reclaim_queue_tables()
     }
 
     pub fn resume_one_orphan(&mut self, now: Timespec) -> Result<(), VfsError> {
