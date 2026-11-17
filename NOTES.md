@@ -252,7 +252,10 @@ An installed system one hour east of UTC reported a restored file one hour
 early through both POSIX stat and fstat. The adapter presented UTC fields as a
 local DOS date. Examine, ExAll and SetDate now use the locale offset in both
 directions. The packet matrix checks half-hour offsets, day rollover, locale
-changes and subsecond preservation. The on-disk format is unchanged.
+changes and subsecond preservation. On boot-mounted volumes the locale library can appear after the mount.
+The handler retries on later date operations and opens the installed library
+once per mount. A host regression exercises late registration, a failed open
+and an offset change with the volume mounted.
 
 ## 2026-11-12 — Populate an image from the Mac at window speed
 

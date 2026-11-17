@@ -38,6 +38,7 @@
 #include <stdint.h>
 
 #include "afsplus_claim.h"
+#include "afsplus_locale.h"
 #include "afsplus_commit_tick.h"
 #include "afsplus_control.h"
 #include "afsplus_packet.h"
@@ -559,16 +560,7 @@ static int32_t packet_relabel(void *context, uint32_t phase,
 static int32_t packet_minutes_west(void *context)
 {
     struct AfsplusArosHandler *handler = context;
-    struct LocaleBase *LocaleBase = handler->LocaleBase;
-    struct Locale *locale;
-    int32_t offset;
-
-    if (LocaleBase == NULL || (locale = OpenLocale(NULL)) == NULL)
-        return 0;
-    offset = locale->loc_GMTOffset;
-    CloseLocale(locale);
-    (void)LocaleBase;
-    return offset;
+    return afsplus_aros_minutes_west(handler->SysBase, &handler->LocaleBase);
 }
 
 static int32_t packet_now(void *context, int64_t *unix_seconds,
@@ -1429,13 +1421,11 @@ static void cleanup_handler(struct AfsplusArosHandler *handler)
 {
     struct ExecBase *SysBase;
     struct DosLibrary *DOSBase;
-    struct LocaleBase *LocaleBase;
 
     if (handler == NULL)
         return;
     SysBase = handler->SysBase;
     DOSBase = handler->DOSBase;
-    LocaleBase = handler->LocaleBase;
 
     afsplus_aros_startup_trace(SysBase, UINT32_C(0x60000001));
     if (handler->packets != NULL)
@@ -1516,7 +1506,6 @@ static void cleanup_handler(struct AfsplusArosHandler *handler)
     FreeMem(handler, sizeof(*handler));
 
     (void)DOSBase;
-    (void)LocaleBase;
 }
 
 /* Rust panic text, one line, to the debug console; the abort follows. */
@@ -1571,8 +1560,6 @@ static struct AfsplusArosHandler *initialize_handler(struct ExecBase *SysBase,
         *error = ERROR_NO_FREE_STORE;
         return handler;
     }
-    handler->LocaleBase = (struct LocaleBase *)OpenLibrary(
-        (CONST_STRPTR)"locale.library", 38);
 
     *error = open_device(handler);
     if (*error == 0)

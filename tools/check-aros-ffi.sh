@@ -105,6 +105,11 @@ echo "[aros-ffi] host C11 header"
 clang -std=c11 -Wall -Wextra -Werror -I api \
     -include afsplus_aros.h -fsyntax-only -x c /dev/null
 
+echo "[aros-ffi] locale appearing after a boot mount"
+clang -std=c11 -Wall -Wextra -Werror -I native/aros \
+    native/aros/tests/locale_stub.c -o "$task_dir/locale-stub"
+"$task_dir/locale-stub"
+
 echo "[aros-ffi] host DosPacket translation matrix"
 clang -std=c11 -Wall -Wextra -Werror -I native/aros \
     native/aros/tests/authority_stub.c -o "$task_dir/authority-stub"
