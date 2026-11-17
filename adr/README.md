@@ -165,7 +165,7 @@ AtomicBatch API is proposed. Amendment and supersession links define scope.
 | [ADR-134](ADR-134-loaded-aros-authority-lifetime.md) | Query a permanently loaded AROS authority service | Accepted | amends [ADR-125](ADR-125-aros-backup-authority.md) |
 | [ADR-135](ADR-135-anyone-snapshot-policy.md) | Admit every local task to AFSSYS snapshots | Accepted | amends [ADR-125](ADR-125-aros-backup-authority.md), [ADR-131](ADR-131-afssys-automount-snapshot-policy.md) |
 | [ADR-136](ADR-136-snapshot-handle-ownership-and-stage-bounds.md) | Bind snapshot handles to their opener and keep captured stages private | Accepted | amends [ADR-125](ADR-125-aros-backup-authority.md), [ADR-127](ADR-127-aros-snapshot-file-restore.md), [ADR-128](ADR-128-confined-snapshot-tree-restore.md), [ADR-130](ADR-130-bounded-private-restore-stages.md), [ADR-133](ADR-133-restore-stage-lifetime-and-recovery.md) |
-| [ADR-137](ADR-137-host-mount-delayed-commit-option.md) | A host mount may delay commits when its user asks | Accepted | amends [ADR-121](ADR-121-delayed-group-commit.md) |
+| [ADR-137](ADR-137-host-mount-delayed-commit-option.md) | A host mount may delay commits when its user asks | Accepted (2026-11-13) | amends [ADR-121](ADR-121-delayed-group-commit.md) |
 
 <!-- /adr-index -->
 

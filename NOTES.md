@@ -9,6 +9,7 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- toc -->
 
+- [2026-11-17 — Preserve UTC file times through DOS metadata packets](#2026-11-17--preserve-utc-file-times-through-dos-metadata-packets)
 - [2026-11-12 — Populate an image from the Mac at window speed](#2026-11-12--populate-an-image-from-the-mac-at-window-speed)
 - [2026-11-12 — Mount a stopped lab image from the Mac](#2026-11-12--mount-a-stopped-lab-image-from-the-mac)
 - [2026-11-12 — Hold ACTION_REPLACE_OBJECT to the neutral DOS contract](#2026-11-12--hold-actionreplaceobject-to-the-neutral-dos-contract)
@@ -244,6 +245,14 @@ Entry format: `## YYYY-MM-DD — title`.
 
 <!-- /toc -->
 
+
+## 2026-11-17 — Preserve UTC file times through DOS metadata packets
+
+An installed system one hour east of UTC reported a restored file one hour
+early through both POSIX stat and fstat. The adapter presented UTC fields as a
+local DOS date. Examine, ExAll and SetDate now use the locale offset in both
+directions. The packet matrix checks half-hour offsets, day rollover, locale
+changes and subsecond preservation. The on-disk format is unchanged.
 
 ## 2026-11-12 — Populate an image from the Mac at window speed
 

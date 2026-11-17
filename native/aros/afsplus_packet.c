@@ -102,6 +102,7 @@ struct AfsplusArosPacketContext {
     AfsplusArosPacketAllocate allocate;
     AfsplusArosPacketFree free;
     AfsplusArosPacketNow now;
+    int32_t (*minutes_west)(void *context);
     struct AfsplusArosNativeLock *locks;
     struct AfsplusArosNativeFile *files;
     struct AfsplusArosNativeNotify *notifies;
@@ -511,14 +512,21 @@ static int32_t require_group(const struct AfsplusArosPacketContext *context,
     return (context->groups & group) != 0 ? 0 : ERROR_ACTION_NOT_KNOWN;
 }
 
-static int32_t datestamp_to_unix(const struct DateStamp *date,
+static int64_t local_epoch(const struct AfsplusArosPacketContext *context)
+{
+    int32_t offset = context->minutes_west
+        ? context->minutes_west(context->callback_context) : 0;
+    return AFSPLUS_UNIX_TO_AMIGA_EPOCH + (int64_t)offset * 60;
+}
+
+static int32_t datestamp_to_unix(int64_t epoch, const struct DateStamp *date,
     int64_t *seconds, uint32_t *nanoseconds)
 {
     if (date == NULL || date->ds_Days < 0 || date->ds_Minute < 0
         || date->ds_Minute >= 24 * 60 || date->ds_Tick < 0
         || date->ds_Tick >= 60 * (LONG)AFSPLUS_TICKS_PER_SECOND)
         return ERROR_BAD_NUMBER;
-    *seconds = AFSPLUS_UNIX_TO_AMIGA_EPOCH
+    *seconds = epoch
         + (int64_t)date->ds_Days * AFSPLUS_SECONDS_PER_DAY
         + (int64_t)date->ds_Minute * AFSPLUS_SECONDS_PER_MINUTE
         + date->ds_Tick / (LONG)AFSPLUS_TICKS_PER_SECOND;
@@ -643,7 +651,7 @@ static SIPTR read_link_path(struct AfsplusArosPacketContext *context,
     return -1;
 }
 
-static void unix_to_datestamp(int64_t seconds, uint32_t nanoseconds,
+static void unix_to_datestamp(int64_t epoch, int64_t seconds, uint32_t nanoseconds,
     struct DateStamp *date)
 {
     int64_t amiga;
@@ -652,10 +660,12 @@ static void unix_to_datestamp(int64_t seconds, uint32_t nanoseconds,
     int64_t minutes;
     uint64_t ticks;
 
-    if (seconds <= AFSPLUS_UNIX_TO_AMIGA_EPOCH)
+    if (seconds <= epoch)
         amiga = 0;
+    else if (seconds >= epoch + ((int64_t)INT32_MAX + 1) * AFSPLUS_SECONDS_PER_DAY)
+        amiga = ((int64_t)INT32_MAX + 1) * AFSPLUS_SECONDS_PER_DAY - 1;
     else
-        amiga = seconds - AFSPLUS_UNIX_TO_AMIGA_EPOCH;
+        amiga = seconds - epoch;
     days = amiga / AFSPLUS_SECONDS_PER_DAY;
     day_seconds = amiga % AFSPLUS_SECONDS_PER_DAY;
     minutes = day_seconds / AFSPLUS_SECONDS_PER_MINUTE;
@@ -663,8 +673,6 @@ static void unix_to_datestamp(int64_t seconds, uint32_t nanoseconds,
         * AFSPLUS_TICKS_PER_SECOND;
     ticks += nanoseconds / UINT32_C(20000000);
 
-    if (days > INT32_MAX)
-        days = INT32_MAX;
     date->ds_Days = (LONG)days;
     date->ds_Minute = (LONG)minutes;
     date->ds_Tick = ticks > INT32_MAX ? INT32_MAX : (LONG)ticks;
@@ -685,7 +693,7 @@ static const size_t exall_fixed_size[] =
 
 /* Appends one entry at *cursor when it fits before end. Strings follow the
  * fixed part and the next entry starts pointer-aligned. */
-static uint32_t exall_append(uint8_t **cursor, uint8_t *end, LONG type,
+static uint32_t exall_append(int64_t epoch, uint8_t **cursor, uint8_t *end, LONG type,
     const struct AfsplusArosPendingEntry *source, struct ExAllData **last)
 {
     struct ExAllData *entry = (struct ExAllData *)*cursor;
@@ -724,7 +732,7 @@ static uint32_t exall_append(uint8_t **cursor, uint8_t *end, LONG type,
     {
         struct DateStamp date;
 
-        unix_to_datestamp(source->info.modified_seconds,
+        unix_to_datestamp(epoch, source->info.modified_seconds,
             source->info.modified_nanoseconds, &date);
         entry->ed_Days = (ULONG)date.ds_Days;
         entry->ed_Mins = (ULONG)date.ds_Minute;
@@ -773,7 +781,7 @@ static int32_t fill_fib_name(UBYTE *destination, size_t capacity,
 /* dos/dos.h FIBEXTF_OBJECTKEY: fib_ObjectKey identifies the object. */
 #define AFSPLUS_FIBEXTF_OBJECTKEY 2
 
-static int32_t fill_fib(struct FileInfoBlock *fib, uint32_t wide,
+static int32_t fill_fib(int64_t epoch, struct FileInfoBlock *fib, uint32_t wide,
     const struct AfsplusArosFileInfo *info, const uint8_t *name,
     const uint8_t *comment, uint32_t comment_length)
 {
@@ -814,12 +822,12 @@ static int32_t fill_fib(struct FileInfoBlock *fib, uint32_t wide,
             fib->fib_ActExtFlags |= AFSPLUS_FIBEXTF_OBJECTKEY;
         }
     }
-    unix_to_datestamp(info->modified_seconds, info->modified_nanoseconds,
+    unix_to_datestamp(epoch, info->modified_seconds, info->modified_nanoseconds,
         &fib->fib_Date);
     return 0;
 }
 
-static int32_t fill_packet_fib(LONG action, BPTR raw,
+static int32_t fill_packet_fib(int64_t epoch, LONG action, BPTR raw,
     const struct AfsplusArosFileInfo *info, const uint8_t *name,
     const uint8_t *comment, uint32_t comment_length)
 {
@@ -828,7 +836,7 @@ static int32_t fill_packet_fib(LONG action, BPTR raw,
     if (raw == BNULL)
         return ERROR_INVALID_LOCK;
     destination = BADDR(raw);
-    return fill_fib((struct FileInfoBlock *)destination,
+    return fill_fib(epoch, (struct FileInfoBlock *)destination,
         action == ACTION_EXAMINE_OBJECT64 || action == ACTION_EXAMINE_NEXT64
             || action == ACTION_EXAMINE_FH64,
         info, name, comment, comment_length);
@@ -1091,6 +1099,7 @@ int32_t afsplus_aros_packet_create(
     context->allocate = config->allocate;
     context->free = config->free;
     context->now = config->now;
+    context->minutes_west = config->minutes_west;
     context->notify = config->notify;
     context->relabel = config->relabel;
     context->complete = config->complete;
@@ -2056,7 +2065,7 @@ int32_t afsplus_aros_packet_process(
             error = afsplus_aros_examine_lock(context->filesystem, id,
                 &info, name, sizeof(name));
         if (error == 0)
-            error = fill_fib((struct FileInfoBlock *)BADDR(
+            error = fill_fib(local_epoch(context), (struct FileInfoBlock *)BADDR(
                 (BPTR)packet->dp_Arg3), 1, &info, name, NULL, 0);
         if (id != 0)
             (void)afsplus_aros_free_lock(context->filesystem, id);
@@ -2763,7 +2772,7 @@ int32_t afsplus_aros_packet_process(
         if (error == 0)
             error = bstr_view(packet->dp_Arg3, &path, &path_length);
         if (error == 0 && packet->dp_Type == ACTION_SET_DATE)
-            error = datestamp_to_unix(
+            error = datestamp_to_unix(local_epoch(context),
                 (const struct DateStamp *)packet->dp_Arg4,
                 &modified_seconds, &modified_nanoseconds);
         if (error == 0)
@@ -2903,7 +2912,7 @@ int32_t afsplus_aros_packet_process(
             }
         }
         if (error == 0)
-            error = fill_packet_fib(packet->dp_Type,
+            error = fill_packet_fib(local_epoch(context), packet->dp_Type,
                 (BPTR)packet->dp_Arg2, &info, name, comment,
                 comment_length);
         if (temporary_root != 0)
@@ -2915,6 +2924,7 @@ int32_t afsplus_aros_packet_process(
     }
     case ACTION_EXAMINE_ALL:
     {
+        int64_t epoch = local_epoch(context);
         struct AfsplusArosNativeLock *lock = find_lock(context,
             (BPTR)packet->dp_Arg1);
         uint8_t *cursor = (uint8_t *)packet->dp_Arg2;
@@ -2991,7 +3001,7 @@ int32_t afsplus_aros_packet_process(
                     break;
                 lock->exall_pending = 1;
             }
-            if (!exall_append(&cursor, end, type, lock->exall, &last))
+            if (!exall_append(epoch, &cursor, end, type, lock->exall, &last))
             {
                 /* Kept for the next call. A buffer too small for one entry
                  * is the caller's error. */

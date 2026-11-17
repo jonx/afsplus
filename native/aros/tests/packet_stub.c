@@ -131,6 +131,13 @@ static void packet_free(void *context, void *allocation, size_t size)
     free(allocation);
 }
 
+static int32_t stub_minutes_west;
+static int32_t packet_minutes_west(void *context)
+{
+    (void)context;
+    return stub_minutes_west;
+}
+
 static int32_t packet_now(void *context, int64_t *seconds,
     uint32_t *nanoseconds)
 {
@@ -1815,6 +1822,7 @@ int main(void)
     config.allocate = packet_allocate;
     config.free = packet_free;
     config.now = packet_now;
+    config.minutes_west = packet_minutes_west;
     config.notify = packet_notify;
     config.relabel = packet_relabel;
     config.complete = packet_complete;
@@ -2312,6 +2320,30 @@ int main(void)
         assert(stub_modified_seconds == INT64_C(252547261));
         assert(stub_modified_nanoseconds == UINT32_C(40000000));
         assert_event(0, 'd', "note", 0);
+
+        /* Read the same UTC instant on both sides of midnight. Feeding each
+         * local result back through SetDate must preserve the on-disk time. */
+        const int32_t offsets[] = { 300, -330 };
+        for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+            stub_minutes_west = offsets[i];
+            initialize_packet(&packet, ACTION_EXAMINE_OBJECT);
+            packet.dp_Arg1 = (SIPTR)root;
+            packet.dp_Arg2 = (SIPTR)MKBADDR(&fib);
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+            assert(fib.fib_Date.ds_Days == (i == 0 ? 0 : 1));
+            assert(fib.fib_Date.ds_Minute == (i == 0 ? 1141 : 331));
+            assert(fib.fib_Date.ds_Tick == 52);
+            initialize_packet(&packet, ACTION_SET_DATE);
+            packet.dp_Arg2 = (SIPTR)root;
+            packet.dp_Arg3 = packet_bstr("note");
+            packet.dp_Arg4 = (SIPTR)&fib.fib_Date;
+            assert(afsplus_aros_packet_process(context, &packet) == 0);
+            assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+            assert(stub_modified_seconds == INT64_C(252547261));
+            assert(stub_modified_nanoseconds == UINT32_C(40000000));
+        }
+        stub_minutes_west = 0;
 
         stamp.ds_Tick = 3000;
         reset_events();
@@ -3079,6 +3111,7 @@ int main(void)
             + offsetof(struct ExAllData, ed_Comment) + 3 - 1);
         packet.dp_Arg4 = ED_DATE;
         packet.dp_Arg5 = (SIPTR)&control;
+        stub_minutes_west = 60;
         assert(afsplus_aros_packet_process(context, &packet) == 0);
         assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
         assert(control.eac_Entries == 2 && control.eac_LastKey != 0);
@@ -3087,8 +3120,9 @@ int main(void)
         assert(strcmp((char *)entry->ed_Name, "e0") == 0);
         assert(entry->ed_Type == ST_LINKFILE && entry->ed_Size == 10);
         assert(entry->ed_Prot == 0x40);
-        assert(entry->ed_Days == 1 && entry->ed_Mins == 1
+        assert(entry->ed_Days == 0 && entry->ed_Mins == 1381
             && entry->ed_Ticks == 52);
+        stub_minutes_west = 0;
         assert((uint8_t *)entry->ed_Next == buffer.bytes + one);
         entry = entry->ed_Next;
         assert(strcmp((char *)entry->ed_Name, "e1") == 0);

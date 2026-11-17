@@ -84,7 +84,6 @@ struct AfsplusArosHandler {
     struct ExecBase *SysBase;
     struct DosLibrary *DOSBase;
     struct LocaleBase *LocaleBase;
-    struct Locale *locale;
     struct Process *process;
     struct MsgPort *handler_port;
     struct DosList *device_node;
@@ -557,6 +556,21 @@ static int32_t packet_relabel(void *context, uint32_t phase,
     }
 }
 
+static int32_t packet_minutes_west(void *context)
+{
+    struct AfsplusArosHandler *handler = context;
+    struct LocaleBase *LocaleBase = handler->LocaleBase;
+    struct Locale *locale;
+    int32_t offset;
+
+    if (LocaleBase == NULL || (locale = OpenLocale(NULL)) == NULL)
+        return 0;
+    offset = locale->loc_GMTOffset;
+    CloseLocale(locale);
+    (void)LocaleBase;
+    return offset;
+}
+
 static int32_t packet_now(void *context, int64_t *unix_seconds,
     uint32_t *nanoseconds)
 {
@@ -571,9 +585,7 @@ static int32_t packet_now(void *context, int64_t *unix_seconds,
     DateStamp(&stamp);
     if (stamp.ds_Days < 0 || stamp.ds_Minute < 0 || stamp.ds_Tick < 0)
         return ERROR_BAD_NUMBER;
-    if (handler->locale != NULL)
-        gmt_offset = (int64_t)handler->locale->loc_GMTOffset
-            * AFSPLUS_SECONDS_PER_MINUTE;
+    gmt_offset = (int64_t)packet_minutes_west(handler) * AFSPLUS_SECONDS_PER_MINUTE;
     amiga_seconds = (int64_t)stamp.ds_Days * AFSPLUS_SECONDS_PER_DAY
         + (int64_t)stamp.ds_Minute * AFSPLUS_SECONDS_PER_MINUTE
         + (int64_t)stamp.ds_Tick / AFSPLUS_TICKS_PER_SECOND;
@@ -1364,6 +1376,7 @@ static int32_t setup_filesystem(struct AfsplusArosHandler *handler)
     packet_config.allocate = packet_allocate;
     packet_config.free = packet_free;
     packet_config.now = packet_now;
+    packet_config.minutes_west = packet_minutes_west;
     packet_config.authorize_backup = packet_authorize_backup;
     packet_config.authorize_restore = packet_authorize_restore;
     handler->notify_port = CreateMsgPort();
@@ -1495,8 +1508,6 @@ static void cleanup_handler(struct AfsplusArosHandler *handler)
         if (handler->device_node->dol_Task == handler->handler_port)
             handler->device_node->dol_Task = NULL;
     }
-    if (handler->locale != NULL)
-        CloseLocale(handler->locale);
     if (handler->LocaleBase != NULL)
         CloseLibrary((struct Library *)handler->LocaleBase);
     if (handler->DOSBase != NULL)
@@ -1562,11 +1573,6 @@ static struct AfsplusArosHandler *initialize_handler(struct ExecBase *SysBase,
     }
     handler->LocaleBase = (struct LocaleBase *)OpenLibrary(
         (CONST_STRPTR)"locale.library", 38);
-    if (handler->LocaleBase != NULL)
-    {
-        struct LocaleBase *LocaleBase = handler->LocaleBase;
-        handler->locale = OpenLocale(NULL);
-    }
 
     *error = open_device(handler);
     if (*error == 0)

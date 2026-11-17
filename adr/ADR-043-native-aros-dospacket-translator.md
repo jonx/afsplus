@@ -80,9 +80,11 @@ to a smaller structure. Other invalid locks return ERROR_INVALID_LOCK. This
 validation does not allocate distinct action numbers for the two interfaces.
 
 The handler supplies an allocation callback returning suitably aligned public
-memory, its matching free callback, and a UTC Unix time callback. Stored AFS+
-timestamps are converted to the 1978 AROS `DateStamp` epoch at presentation
-time. At most 107 filename bytes may be configured for the packet mount so the
+memory, its matching free callback, a UTC Unix time callback and the current
+locale offset in minutes west of UTC. Examine and ExAll present stored UTC
+timestamps as local 1978 AROS `DateStamp` values. SetDate applies the inverse
+conversion, including when the offset crosses midnight. An absent locale
+selects UTC. At most 107 filename bytes may be configured for the packet mount so the
 BCPL length byte still fits in `fib_FileName`.
 
 ## Consequences
