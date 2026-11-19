@@ -153,6 +153,8 @@ uint32_t afsplus_aros_packet_waiting(
 void afsplus_aros_packet_elapsed(struct AfsplusArosPacketContext *context,
     uint32_t ticks);
 
+void afsplus_aros_packet_media_removed(struct AfsplusArosPacketContext *context);
+
 uint32_t afsplus_aros_packet_should_quit(
     const struct AfsplusArosPacketContext *context);
 

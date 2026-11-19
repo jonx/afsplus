@@ -137,6 +137,7 @@ struct AfsplusArosHandler {
     uint32_t bounce_size;
     uint32_t use_dma_mask;
     uint32_t device_open;
+    uint32_t media_removed;
     uint32_t volume_registered;
     uint32_t read_only;
     /* From the DOSDriver Control string. */
@@ -621,6 +622,8 @@ static int32_t device_transfer(void *context, uint32_t command,
     void *io_buffer = buffer;
     LONG result;
 
+    if (handler->media_removed)
+        return ERROR_NO_DISK;
     if (request == NULL || buffer == NULL || length == 0
         || command > UINT16_MAX
         || (writing && command != handler->write_command)
@@ -678,6 +681,8 @@ static int32_t device_sync(void *context)
     LONG result;
     const struct Library *device;
 
+    if (handler->media_removed)
+        return ERROR_NO_DISK;
     if (request == NULL || request->iotd_Req.io_Device == NULL)
         return ERROR_BAD_NUMBER;
     device = &request->iotd_Req.io_Device->dd_Library;
@@ -1884,7 +1889,16 @@ static LONG handler_main(struct ExecBase *SysBase, struct DosPacket **death,
             if (packet == NULL)
                 continue;
             if (packet->dp_Type == ACTION_DIE)
+            {
                 collect_notify_replies(state);
+                /* A failed probe is not proof of removal. Only a successful
+                 * TD_CHANGESTATE reporting an empty unit retires this mount. */
+                if (require_media(state) == ERROR_NO_DISK)
+                {
+                    state->media_removed = 1;
+                    afsplus_aros_packet_media_removed(state->packets);
+                }
+            }
             afsplus_aros_startup_trace(SysBase, UINT32_C(0x40000000) |
                 ((uint32_t)packet->dp_Type & UINT32_C(0x0fffffff)));
             retry_commit_policy(state);
