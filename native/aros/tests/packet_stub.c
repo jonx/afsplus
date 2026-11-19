@@ -4241,6 +4241,9 @@ int main(void)
      * released, shutdown cannot write another commit to the missing disk. */
     assert(afsplus_aros_packet_create(&config, &context) == 0);
     afsplus_aros_packet_media_removed(context);
+    initialize_packet(&packet, ACTION_DISK_INFO);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_NO_DISK);
     stub_disk_in_use = 1;
     initialize_packet(&packet, ACTION_DIE);
     assert(afsplus_aros_packet_process(context, &packet) == 0);

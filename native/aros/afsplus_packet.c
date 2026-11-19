@@ -1997,7 +1997,24 @@ int32_t afsplus_aros_packet_process(
     }
 #endif
 
-    if (context->filesystem == NULL || context->inhibited)
+    if (context->media_removed)
+    {
+        switch (packet->dp_Type)
+        {
+        case ACTION_END:
+        case ACTION_FREE_LOCK:
+        case ACTION_FREE_RECORD:
+        case ACTION_FREE_RECORD64:
+        case ACTION_REMOVE_NOTIFY:
+        case ACTION_DIE:
+            break;
+        default:
+            store_packet_result(packet, DOSFALSE, DOSFALSE, ERROR_NO_DISK, packet64);
+            count_packet(context, packet->dp_Type, ERROR_NO_DISK);
+            return 0;
+        }
+    }
+    else if (context->filesystem == NULL || context->inhibited)
     {
         switch (packet->dp_Type)
         {
