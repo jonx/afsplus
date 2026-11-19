@@ -5,6 +5,15 @@ with a portable, OS-neutral on-disk format. This repository holds the
 specification, the Rust reference implementation, a second implementation of
 the reader in portable C, and the plans and decision records behind both.
 
+This project is part of John Knipper's series of native filesystem drivers for AROS.
+[AFS+](https://github.com/jonx/afsplus) is a 64-bit filesystem with Unicode
+filenames and transactions for recovery after a power loss.
+The [exFAT handler](https://github.com/jonx/aros-extfat) reads, writes and
+formats removable media for exchanging files with other operating systems.
+The [APFS reader](https://github.com/pomaros/aros-apfs) mounts unlocked Apple
+File System volumes read-only so you can browse directories and copy files
+from a disk or a raw GPT image.
+
 > **AFS+ is not being created to rebuild ext4, NTFS, or another conventional filesystem with Amiga branding. Its strongest contract is to expose directly to modern applications what a filesystem already knows.**
 
 <!-- toc -->
