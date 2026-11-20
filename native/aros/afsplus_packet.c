@@ -120,6 +120,7 @@ struct AfsplusArosPacketContext {
     uint32_t exall_serial;
     uint32_t inhibited;
     uint32_t quit;
+    uint32_t media_removed;
     uint64_t groups;
     uint32_t revision;
     /* What AFSPLUS_EXT_COMMIT_POLICY answers. The handler pushes it: the
@@ -1195,6 +1196,11 @@ uint32_t afsplus_aros_packet_notify_registered(
     return 0;
 }
 
+void afsplus_aros_packet_media_removed(struct AfsplusArosPacketContext *context)
+{
+    context->media_removed = 1;
+}
+
 uint32_t afsplus_aros_packet_should_quit(
     const struct AfsplusArosPacketContext *context)
 {
@@ -1991,7 +1997,24 @@ int32_t afsplus_aros_packet_process(
     }
 #endif
 
-    if (context->filesystem == NULL || context->inhibited)
+    if (context->media_removed)
+    {
+        switch (packet->dp_Type)
+        {
+        case ACTION_END:
+        case ACTION_FREE_LOCK:
+        case ACTION_FREE_RECORD:
+        case ACTION_FREE_RECORD64:
+        case ACTION_REMOVE_NOTIFY:
+        case ACTION_DIE:
+            break;
+        default:
+            store_packet_result(packet, DOSFALSE, DOSFALSE, ERROR_NO_DISK, packet64);
+            count_packet(context, packet->dp_Type, ERROR_NO_DISK);
+            return 0;
+        }
+    }
+    else if (context->filesystem == NULL || context->inhibited)
     {
         switch (packet->dp_Type)
         {
@@ -3201,7 +3224,8 @@ int32_t afsplus_aros_packet_process(
                 struct AfsplusArosDiskInfo info;
                 error = afsplus_aros_disk_info(context->filesystem, &info);
                 if (error == 0 && info.in_use) error = ERROR_OBJECT_IN_USE;
-                if (error == 0) error = afsplus_aros_flush(context->filesystem);
+                if (error == 0 && !context->media_removed)
+                    error = afsplus_aros_flush(context->filesystem);
             }
             if (error == 0)
             {

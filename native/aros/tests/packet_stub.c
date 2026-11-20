@@ -4236,6 +4236,26 @@ int main(void)
 
     assert(afsplus_aros_packet_destroy(context) == 0);
     assert(stub_removed_watches == 4);
+
+    /* An unplugged unit still honours an active snapshot reader. Once
+     * released, shutdown cannot write another commit to the missing disk. */
+    assert(afsplus_aros_packet_create(&config, &context) == 0);
+    afsplus_aros_packet_media_removed(context);
+    initialize_packet(&packet, ACTION_DISK_INFO);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_NO_DISK);
+    stub_disk_in_use = 1;
+    initialize_packet(&packet, ACTION_DIE);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSFALSE && packet.dp_Res2 == ERROR_OBJECT_IN_USE);
+    assert(!afsplus_aros_packet_should_quit(context));
+    stub_disk_in_use = 0;
+    initialize_packet(&packet, ACTION_DIE);
+    assert(afsplus_aros_packet_process(context, &packet) == 0);
+    assert(packet.dp_Res1 == DOSTRUE && packet.dp_Res2 == 0);
+    assert(afsplus_aros_packet_should_quit(context));
+    assert(flush_count == 3);
+    assert(afsplus_aros_packet_destroy(context) == 0);
     dos64_packets(config, 1);
     dos64_packets(config, 0);
     snapshot_packets(config);

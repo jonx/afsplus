@@ -15,6 +15,8 @@
 #include <aros/debug.h>
 #include <aros/stdc/string.h>
 #include <exec/types.h>
+#include <devices/input.h>
+#include <devices/inputevent.h>
 #include <devices/newstyle.h>
 #include <devices/timer.h>
 #include <devices/trackdisk.h>
@@ -137,6 +139,7 @@ struct AfsplusArosHandler {
     uint32_t bounce_size;
     uint32_t use_dma_mask;
     uint32_t device_open;
+    uint32_t media_removed;
     uint32_t volume_registered;
     uint32_t read_only;
     /* From the DOSDriver Control string. */
@@ -621,6 +624,8 @@ static int32_t device_transfer(void *context, uint32_t command,
     void *io_buffer = buffer;
     LONG result;
 
+    if (handler->media_removed)
+        return ERROR_NO_DISK;
     if (request == NULL || buffer == NULL || length == 0
         || command > UINT16_MAX
         || (writing && command != handler->write_command)
@@ -678,6 +683,8 @@ static int32_t device_sync(void *context)
     LONG result;
     const struct Library *device;
 
+    if (handler->media_removed)
+        return ERROR_NO_DISK;
     if (request == NULL || request->iotd_Req.io_Device == NULL)
         return ERROR_BAD_NUMBER;
     device = &request->iotd_Req.io_Device->dd_Library;
@@ -798,6 +805,33 @@ static uint32_t device_is_write_protected(struct AfsplusArosHandler *handler)
         || request->iotd_Req.io_Error != 0)
         return 0;
     return request->iotd_Req.io_Actual != 0;
+}
+
+/* Workbench updates its disk icons from input.device media events. */
+static void disk_event(struct AfsplusArosHandler *handler, UBYTE event_class)
+{
+    struct ExecBase *SysBase = handler->SysBase;
+    struct MsgPort *port = CreateMsgPort();
+    struct IOStdReq *io;
+    struct InputEvent event = {0};
+
+    if (port == NULL)
+        return;
+    io = (struct IOStdReq *)CreateIORequest(port, sizeof(*io));
+    if (io != NULL)
+    {
+        if (OpenDevice((CONST_STRPTR)"input.device", 0, (struct IORequest *)io, 0) == 0)
+        {
+            event.ie_Class = event_class;
+            io->io_Command = IND_WRITEEVENT;
+            io->io_Data = &event;
+            io->io_Length = sizeof(event);
+            DoIO((struct IORequest *)io);
+            CloseDevice((struct IORequest *)io);
+        }
+        DeleteIORequest((struct IORequest *)io);
+    }
+    DeleteMsgPort(port);
 }
 
 static int32_t require_media(struct AfsplusArosHandler *handler)
@@ -1869,6 +1903,9 @@ static LONG handler_main(struct ExecBase *SysBase, struct DosPacket **death,
     reply_packet(port, SysBase, packet);
     afsplus_aros_startup_trace(SysBase, UINT32_C(0x30200003));
 
+    if (state->volume_registered)
+        disk_event(state, IECLASS_DISKINSERTED);
+
     while (!quit)
     {
         afsplus_aros_startup_trace(SysBase, UINT32_C(0x30200004));
@@ -1884,7 +1921,34 @@ static LONG handler_main(struct ExecBase *SysBase, struct DosPacket **death,
             if (packet == NULL)
                 continue;
             if (packet->dp_Type == ACTION_DIE)
+            {
+                struct DosLibrary *DOSBase = state->DOSBase;
                 collect_notify_replies(state);
+                /* A failed probe is not proof of removal. Only a successful
+                 * TD_CHANGESTATE reporting an empty unit retires this mount. */
+                if (!state->media_removed && require_media(state) == ERROR_NO_DISK)
+                {
+                    state->media_removed = 1;
+                    afsplus_aros_packet_media_removed(state->packets);
+                }
+                /* Existing FileLocks still point at this node. Withdraw its
+                 * name now but keep its memory and port until clients close. */
+                if (state->media_removed && state->volume_registered)
+                {
+                    if (AttemptLockDosList(LDF_ALL | LDF_WRITE) == NULL)
+                    {
+                        packet->dp_Res1 = DOSFALSE;
+                        packet->dp_Res2 = ERROR_OBJECT_IN_USE;
+                        reply_packet(port, SysBase, packet);
+                        continue;
+                    }
+                    state->volume_node->dol_Task = NULL;
+                    RemDosEntry(state->volume_node);
+                    state->volume_registered = 0;
+                    UnLockDosList(LDF_ALL | LDF_WRITE);
+                    disk_event(state, IECLASS_DISKREMOVED);
+                }
+            }
             afsplus_aros_startup_trace(SysBase, UINT32_C(0x40000000) |
                 ((uint32_t)packet->dp_Type & UINT32_C(0x0fffffff)));
             retry_commit_policy(state);
